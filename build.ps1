@@ -116,7 +116,7 @@ if ($Installer) {
     ($apiParts -join '.') | Set-Content -LiteralPath $apiMetadata -Encoding ASCII
     $dllPayload = [IO.Path]::GetFullPath("$pluginDir/glowbox.dll")
     $effectPayload = [IO.Path]::GetFullPath("$dataDir/compositor.effect")
-    Invoke-Checked $csc @('/nologo', '/target:winexe', '/platform:x64', "/out:$installerExe", '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', "/win32manifest:$installerManifest", "/resource:$dllPayload,glowbox.dll", "/resource:$effectPayload,compositor.effect", "/resource:$dataDir/loading.png,loading.png", "/resource:$dataDir/loading-failed.png,loading-failed.png", "/resource:$dataDir/spinner.png,spinner.png", "/resource:$apiMetadata,obs-api.txt", $installerSource, $installerVersionSource)
+    Invoke-Checked $csc @('/nologo', '/codepage:65001', '/target:winexe', '/platform:x64', "/out:$installerExe", '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', "/win32manifest:$installerManifest", "/resource:$dllPayload,glowbox.dll", "/resource:$effectPayload,compositor.effect", "/resource:$dataDir/loading.png,loading.png", "/resource:$dataDir/loading-failed.png,loading-failed.png", "/resource:$dataDir/spinner.png,spinner.png", "/resource:$apiMetadata,obs-api.txt", $installerSource, $installerVersionSource)
 }
 Get-FileHash -LiteralPath "$pluginDir/glowbox.dll", "$dataDir/compositor.effect" -Algorithm SHA256 | Format-Table -AutoSize
 Write-Host "Build complete: $Output"
