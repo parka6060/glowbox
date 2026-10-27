@@ -1,0 +1,108 @@
+// Include after GBDecode, GBEncode, GBBlend, GBReference and GBLinearLuminance.
+// Uniforms belong to renderer.effect. Both entry points receive/return linear RGB.
+
+bool GBWashActive()
+{
+    return gb_wash_size > 0.0 && gb_wash_intensity > 0.0 && gb_wash_opacity > 0.0;
+}
+
+// Saved geometry places the directional emitter outside the canvas, angle zero is top.
+float2 GBWashFalloffs(float2 uv)
+{
+    if(scene_view_offset.x!=0.0 || scene_view_offset.y!=0.0)
+        uv=SceneReferenceUV(uv,lerp(1.0,spotlight_plane_scale,gb_has_subject?GBCoverage(uv):0.0));
+    // Direction is already prepared once per draw for patterns and rays.
+    float2 origin=spotlight_position-2.0*light_travel;
+    return GBWashRadialField(length(uv-origin),gb_wash_size);
+}
+
+// GBReference supplies straight display colour and independent validity.
+// A spectral extinction field with bounded achromatic gain. Black is a valid
+// reference with a neutral depth response, missing references leave colour alone.
+float3 GBWashReferenceTint(float2 uv)
+{
+    float3 white=float3(1.0,1.0,1.0);
+    if(!gb_wash_use_reference || gb_color_match<=0.0) return white;
+    float4 reference=GBReference();
+    if(reference.a<=0.000001) return white;
+    if(scene_view_offset.x!=0.0 || scene_view_offset.y!=0.0)
+        uv=SceneReferenceUV(uv,lerp(1.0,spotlight_plane_scale,gb_has_subject?GBCoverage(uv):0.0));
+    float3 rgb=saturate(reference.rgb);
+    float peak=max(rgb.r,max(rgb.g,rgb.b));
+    float height=saturate((uv.y-0.169581465628)/(1.107220051643-0.169581465628));
+    float depth=height*height*height*(10.0+height*(-15.0+6.0*height));
+    float3 tint;
+    if(peak<=0.000001) tint=0.949704194197*(1.0-0.206033322171*depth);
+    else {
+        float3 extinction_axis=1.0-rgb/peak;
+        float chroma=max(extinction_axis.r,max(extinction_axis.g,extinction_axis.b));
+        float3 direction=extinction_axis/max(chroma,0.082457921798);
+        float gain=lerp(max(peak,0.949704194197),max(peak,0.819184325435),0.206033322171*depth);
+        float3 optical_depth=0.118449029282*direction+depth*(0.232072545548*extinction_axis+0.072806512626*extinction_axis*extinction_axis);
+        tint=gain*exp2(-optical_depth);
+    }
+    return lerp(white,tint,saturate(gb_color_match));
+}
+
+float3 GBApplyMainWash(float3 linear_rgb, float2 uv)
+{
+    if (!GBWashActive())
+        return linear_rgb;
+
+    float strength = saturate(gb_wash_intensity);
+    float2 falloffs = GBWashFalloffs(uv);
+    // Multiply and Color Dodge operate in encoded RGB.
+
+    float3 transmittance=float3(falloffs.y,falloffs.y,falloffs.y);
+    float3 shadowed=GBDecodeBlend(GBBlend(GBEncodeBlend(linear_rgb),GBEncodeBlend(transmittance),2));
+
+    float3 attenuated_linear=lerp(linear_rgb,shadowed,0.6*strength);
+    float3 illumination_linear = GBDecode(saturate(gb_wash_color)) *
+                                 GBWashReferenceTint(uv) *
+                                 falloffs.x * falloffs.x * strength * SurfacePattern(uv);
+    int standard_mode = 5;
+    if (gb_wash_blend_mode == 1)
+        standard_mode = 7;
+    else if (gb_wash_blend_mode == 2)
+        standard_mode = 8;
+    float3 washed = GBDecodeBlend(GBBlend(GBEncodeBlend(attenuated_linear),
+                            GBEncodeBlend(illumination_linear), standard_mode));
+    // Opacity fades the completed blend, Intensity controls its light energy.
+    return lerp(linear_rgb, washed, saturate(gb_wash_opacity)*SpotlightReceive(uv));
+}
+
+// Capture coverage weights emission once. Wash propagation stores linear
+// radiance with A=1, this validity is independent of final output alpha.
+float3 GBApplySecondaryWash(float3 linear_rgb, float4 wash_field, float2 uv)
+{
+    if(!GBWashActive() || wash_field.a<=0.000001) return linear_rgb;
+    float strength=saturate(gb_wash_intensity);
+    float3 radiance=max(wash_field.rgb/wash_field.a,0.0)*strength;
+    float3 energy=min(radiance,4.0);
+    float3 energy_root=sqrt(energy);
+    float3 energy_quarter=sqrt(energy_root);
+    float3 material=sqrt(saturate(linear_rgb));
+    // fitted linear-light response, not an encoded Screen blend
+    // white surfaces and zero light must remain unchanged
+    float3 direct=(0.088755951776 + material * (-0.156062428077 + material * (-0.458390728456 + material * (2.304725243768 + material * (-4.166739705740 + material * (3.437965730185 + material * -1.074356851071))))));
+    float3 diffuse=(0.000000000000 + material * (0.511665505601 + material * (-0.822107058074 + material * (2.211528796143 + material * (-5.060090243990 + material * (5.863727878397 + material * -2.501027542245))))));
+    float3 broad=(0.000000000000 + material * (-0.233917744017 + material * (1.683288173326 + material * (-6.686174291270 + material * (13.570017856235 + material * (-13.315569617123 + material * 4.985795247589))))));
+    float3 response=max(energy*direct+energy_root*diffuse+energy_quarter*broad,0.0);
+    // extend the fitted response continuously into HDR
+    // Use D3D's branch hint to skip the polynomial for LDR pixels,
+    // keeping the hint out of OpenGL translation.
+#ifdef _D3D11
+    [branch]
+#endif
+    if(any(radiance>4.0)) {
+        float3 distance=max((sqrt(min(radiance,64.0))-2.0)/6.0,0.0);
+        float3 tail0=(2.279110038516 + material * (-3.441381416453 + material * (4.436397957207 + material * (-3.826750391730 + material * 1.435897761412))));
+        float3 tail1=(3.678124799338 + material * (-9.760073655272 + material * (11.042002002722 + material * (-6.828085246198 + material * 1.671260808067))));
+        float3 tail2=(0.712380704819 + material * (-3.198968941330 + material * (6.135970287133 + material * (-5.820194427059 + material * 2.266757388978))));
+        response+=max(distance*(tail0+distance*(tail1+distance*tail2)),0.0);
+        // Positive tangent continuation keeps out-of-contract fields finite.
+        response+=max(radiance-64.0,0.0)*max((1.0*tail0+2.0*tail1+3.0*tail2)/96.0,0.0);
+    }
+    float receive=saturate(wash_field.a)*saturate(gb_wash_opacity)*SpotlightReceive(uv);
+    return linear_rgb+strength*receive*max(1.0-linear_rgb,0.0)*response;
+}

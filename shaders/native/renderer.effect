@@ -1,0 +1,385 @@
+// Capture and output use premultiplied display RGB. Lighting fields use linear
+// RGB with opaque validity, original capture alpha is restored only at output.
+
+uniform float4x4 ViewProj;
+uniform int gb_renderer_revision = 18;
+uniform texture2d gb_scene_texture;
+uniform texture2d source_screen_mask;
+uniform bool source_screen_enabled;
+uniform texture2d gb_coverage_texture;
+uniform texture2d gb_rim_boundary_mask;
+uniform bool gb_rim_boundary_ready;
+uniform float4 gb_rim_boundary_uv;
+uniform texture2d gb_reference_texture;
+uniform texture2d gb_light_texture;
+uniform texture2d gb_highlight_texture;
+uniform texture2d gb_wash_texture;
+uniform texture2d gb_input_texture;
+
+uniform float2 gb_canvas_size;
+uniform float2 gb_input_texel_size;
+uniform float2 gb_blur_step;
+uniform bool gb_has_subject = false;
+uniform bool gb_use_reference_texture = false;
+uniform float4 gb_reference_color = {0.0, 0.0, 0.0, 0.0};
+
+uniform float gb_subject_exposure = 0.0;
+uniform float gb_background_exposure = 0.0;
+uniform float gb_global_exposure = 0.0;
+uniform float gb_color_match = 0.0;
+
+uniform float3 gb_tint = {1.0, 1.0, 1.0};
+uniform float gb_brightness = 0.0;
+uniform float gb_contrast = 0.0;
+uniform float gb_saturation = 0.0;
+uniform float4 gb_tone_brightness_curve;
+uniform float4 gb_tone_contrast_curve;
+uniform float2 gb_tone_darken;
+uniform float3 gb_tone_tint_low;
+uniform float3 gb_tone_tint_rise;
+
+uniform int gb_screen_mode = 0;
+uniform float gb_effect_intensity = 0.0;
+uniform float gb_effect_opacity = 0.0;
+uniform float gb_glow_threshold = 0.3;
+uniform float gb_diffusion_contrast = 0.0;
+
+uniform bool gb_rim_enabled = false;
+uniform int gb_rim_style = 0;
+uniform float3 gb_rim_color = {1.0, 1.0, 1.0};
+uniform float gb_rim_size = 0.0;
+uniform float gb_rim_brightness = 0.0;
+uniform float gb_rim_contrast = 0.0;
+uniform float2 gb_rim_axis_single;
+uniform float2 gb_rim_axis_left;
+uniform float2 gb_rim_axis_right;
+uniform float gb_rim_opacity = 0.0;
+uniform int gb_rim_blend_mode = 5;
+
+uniform float3 gb_wash_color = {1.0, 1.0, 1.0};
+uniform bool gb_wash_use_reference = false;
+uniform float gb_wash_size = 0.0;
+uniform float gb_wash_intensity = 0.0;
+uniform float gb_wash_opacity = 0.0;
+uniform int gb_wash_blend_mode = 2;
+
+
+sampler_state gb_linear_clamp {
+    Filter = Linear;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+
+float GBSourceScreenReceive(float2 uv) {
+    if (!source_screen_enabled) return 1;
+    float4 mask = source_screen_mask.SampleLevel(gb_linear_clamp, uv,0.0);
+    return saturate(1 - mask.b / max(mask.a, .00001));
+}
+struct GBVertex {
+    float4 position : POSITION;
+    float2 uv : TEXCOORD0;
+};
+
+GBVertex GBVertexMain(GBVertex vertex_in)
+{
+    GBVertex vertex_out;
+    vertex_out.position = mul(float4(vertex_in.position.xyz, 1.0), ViewProj);
+    vertex_out.uv = vertex_in.uv;
+    return vertex_out;
+}
+
+float GBDecodeChannel(float encoded)
+{
+    float nonnegative = max(encoded, 0.0);
+    if (nonnegative <= 0.04045)
+        return nonnegative / 12.92;
+    return pow((nonnegative + 0.055) / 1.055, 2.4);
+}
+
+float GBEncodeChannel(float linear_value)
+{
+    float nonnegative = max(linear_value, 0.0);
+    if (nonnegative <= 0.0031308)
+        return nonnegative * 12.92;
+    return 1.055 * pow(nonnegative, 1.0 / 2.4) - 0.055;
+}
+
+float3 GBDecode(float3 encoded)
+{
+    return float3(GBDecodeChannel(encoded.r), GBDecodeChannel(encoded.g),
+                  GBDecodeChannel(encoded.b));
+}
+
+float3 GBEncode(float3 linear_value)
+{
+    return float3(GBEncodeChannel(linear_value.r), GBEncodeChannel(linear_value.g),
+                  GBEncodeChannel(linear_value.b));
+}
+
+// Thank you Ian Taylor for the sRGB approximation formula, go read about it here:
+// https://chilliant.blogspot.com/2012/08/srgb-approximations-for-hlsl.html
+float3 GBDecodeBlend(float3 encoded)
+{
+    float3 color_value = max(encoded, 0.0);
+    return color_value * (0.012522878 + color_value * (0.682171106 + 0.305306017 * color_value));
+}
+
+float3 GBEncodeBlend(float3 linear_value)
+{
+    return max(1.055 * pow(max(linear_value, 0.0), float3(1.0 / 2.4, 1.0 / 2.4, 1.0 / 2.4)) - 0.055, 0.0);
+}
+
+float3 GBStraight(float4 premultiplied)
+{
+    if (premultiplied.a <= 0.0)
+        return float3(0.0, 0.0, 0.0);
+    return premultiplied.rgb / max(premultiplied.a, 0.000001);
+}
+
+float GBLinearLuminance(float3 linear_rgb)
+{
+    return dot(linear_rgb, float3(0.2126, 0.7152, 0.0722));
+}
+
+#include "blend-stage.effect"
+
+float4 GBReference()
+{
+    float4 average_value = gb_reference_color;
+    if (gb_use_reference_texture)
+        average_value = gb_reference_texture.SampleLevel(gb_linear_clamp, float2(0.5, 0.5),0.0);
+    if (average_value.a <= 0.000001)
+        return float4(0.0, 0.0, 0.0, 0.0);
+    return float4(average_value.rgb / average_value.a, average_value.a);
+}
+
+
+// Bounded automatic offset, saved manual exposure remains independent.
+#include "bounded-reactive.effect"
+uniform texture2d follow_signal;
+uniform float follow_amount;
+uniform bool follow_background;
+float FollowBrightnessGain(bool subject) {
+    if (bounded_pipeline || follow_amount <= 0 || (!subject && !follow_background)) return 1;
+    return exp2(follow_signal.SampleLevel(gb_linear_clamp, float2(.5,.5), 0).r * follow_amount);
+}
+float GBCoverage(float2 uv)
+{
+    float4 mask = gb_coverage_texture.SampleLevel(gb_linear_clamp, uv,0.0);
+    return saturate(gb_has_subject ? mask.r : mask.a);
+}
+
+float GBSubjectFraction(float2 uv, float scene_alpha)
+{
+    if (!gb_has_subject)
+        return 1.0;
+    return saturate(GBCoverage(uv) / max(scene_alpha, 0.000001));
+}
+
+
+float4 GBDownsamplePixel(GBVertex vertex_in) : TARGET
+{
+    float2 input_texel_size = gb_input_texel_size;
+    float4 field_value = gb_input_texture.SampleLevel(gb_linear_clamp,
+                        vertex_in.uv + float2(-input_texel_size.x, -input_texel_size.y),0.0);
+    field_value += gb_input_texture.SampleLevel(gb_linear_clamp,
+                   vertex_in.uv + float2(input_texel_size.x, -input_texel_size.y),0.0);
+    field_value += gb_input_texture.SampleLevel(gb_linear_clamp,
+                   vertex_in.uv + float2(-input_texel_size.x, input_texel_size.y),0.0);
+    field_value += gb_input_texture.SampleLevel(gb_linear_clamp, vertex_in.uv + input_texel_size,0.0);
+    return field_value * 0.25;
+}
+
+uniform texture2d gb_reactive_signal;
+uniform texture2d gb_reactive_spatial;
+uniform float gb_reactive_spatial_amount;
+uniform float gb_reactive_strength;
+// Source chromaticity and energy are separate, this is an artistic light signal.
+float4 GBReactiveLight(float2 uv) {
+    // Fully spatial light does not consume the global signal. Keep the mixed
+    // path below for fractional participation during Move transitions.
+    if (gb_reactive_spatial_amount == 1) {
+        float4 local = gb_reactive_spatial.SampleLevel(gb_linear_clamp, uv,0.0);
+        return float4(local.rgb / max(local.a, .00001), local.a);
+    }
+    float4 ambient = gb_reactive_signal.SampleLevel(gb_linear_clamp, float2(.25,.5),0.0);
+    float4 bright = gb_reactive_signal.SampleLevel(gb_linear_clamp, float2(.75,.5),0.0);
+    float ambient_peak = max(ambient.r, max(ambient.g, ambient.b));
+    float bright_peak = max(bright.r, max(bright.g, bright.b));
+    float3 ambient_color = ambient.rgb / max(ambient_peak, .00001);
+    float3 bright_color = bright.rgb / max(bright_peak, .00001);
+    float ambient_level = sqrt(saturate(.65 * dot(ambient.rgb, float3(.2126,.7152,.0722))
+                                       + .35 * ambient_peak));
+    float event_level = .50 * saturate(bright.a);
+    float light_level = ambient_level + event_level;
+    float3 light_color = (ambient_color * ambient_level + bright_color * event_level)
+                         / max(light_level, .00001);
+    float4 light=float4(light_color,light_level*ambient.a);
+    if(gb_reactive_spatial_amount>0) {
+        float4 local=gb_reactive_spatial.SampleLevel(gb_linear_clamp,uv,0.0);
+        float4 mixed=lerp(float4(light.rgb*light.a,light.a),local,gb_reactive_spatial_amount);
+        light=float4(mixed.rgb/max(mixed.a,.00001),mixed.a);
+    }
+    return light;
+}
+float3 GBReactiveAddLight(float3 baseline, float3 added) {
+    added /= 1 + dot(added, float3(.2126,.7152,.0722));
+    return baseline + min(max(float3(0,0,0), 1 - baseline), added);
+}
+float3 GBReactiveRimLight(float3 baseline, float3 reflectance, float visibility,
+                        float opacity, float coverage, float2 uv) {
+    if (bounded_pipeline || gb_reactive_strength <= 0) return baseline;
+    float4 light = GBReactiveLight(uv);
+    // Concentrated grazing-light approximation using the existing rim geometry.
+    // The small reflection floor is restricted to the rim, never the body.
+    float amount = gb_reactive_strength * light.a * visibility
+                   * sqrt(saturate(opacity)) * saturate(coverage);
+    float3 added = light.rgb * amount * (1.2 * max(reflectance, 0) + .10);
+    return GBReactiveAddLight(baseline, added);
+}
+
+#include "rim-stage.effect"
+
+#include "wash-profile.effect"
+#include "spotlight-stage.effect"
+#include "wash-stage.effect"
+#include "gradient-stage.effect"
+
+#include "tone-stage.effect"
+
+
+
+struct GBPreparedScene {
+    float3 source_linear;
+    float3 treated_linear;
+    float subject_fraction;
+    float alpha;
+};
+
+GBPreparedScene GBPrepareSceneSample(float2 uv, float resolved_coverage, bool grid_aligned)
+{
+    GBPreparedScene prepared;
+    float4 capture_value = gb_scene_texture.SampleLevel(gb_linear_clamp, uv,0.0);
+    prepared.alpha = capture_value.a;
+    float3 display_rgb = GBStraight(capture_value);
+    prepared.subject_fraction = GBSubjectFraction(uv, capture_value.a);
+    // Selected OBS items already received Auto Color before scene composition.
+    // A direct source has no item wrappers, so apply its tint here instead.
+    if (!gb_has_subject)
+        display_rgb *= GBWashReferenceTint(uv);
+    prepared.source_linear = GBDecode(display_rgb);
+    float global_gain = exp2(clamp(gb_global_exposure, -3.0, 3.0));
+    float3 subject_linear = saturate(prepared.source_linear * global_gain *
+                                        exp2(clamp(gb_subject_exposure, -3.0, 3.0)) * FollowBrightnessGain(true));
+    float3 background_linear = prepared.source_linear * global_gain *
+                               exp2(clamp(gb_background_exposure, -3.0, 3.0)) * FollowBrightnessGain(false);
+    float surface_coverage = resolved_coverage;
+#ifdef _D3D11
+    [branch]
+#endif
+    if (surface_coverage < 0.0)
+        surface_coverage = GBSubjectSurfaceCoverage(uv, prepared.alpha, prepared.subject_fraction, grid_aligned);
+    float surface_opacity = GBScreenSurfaceOpacity() * GBSourceScreenReceive(uv);
+    float2 surface_colors = float2(0.0, 0.0);
+    if (surface_opacity > 0.0)
+        surface_colors = GBSurfaceBlendColors(uv.y);
+    subject_linear = GBApplySubjectSurface(subject_linear, surface_coverage, surface_colors.x, surface_opacity);
+    surface_coverage = GBSubjectSurfaceUnion(surface_coverage, surface_opacity);
+#ifdef _D3D11
+    [branch]
+#endif
+    if (GBRimActive()) {
+        GBRimSurface surface = GBApplyRimSurface(subject_linear, surface_coverage, uv);
+        subject_linear = surface.linear_rgb;
+        surface_coverage = surface.subject_fraction;
+    }
+    prepared.subject_fraction = surface_coverage;
+    float3 linear_rgb = lerp(background_linear, subject_linear, surface_coverage);
+    linear_rgb = GBApplySceneSurface(linear_rgb, surface_colors.y, surface_opacity);
+    prepared.treated_linear = linear_rgb;
+    return prepared;
+}
+
+#include "rim-edge-stage.effect"
+
+// Apply scene lighting after rim/exposure in a separate pass
+// to stay within OBS's eight-texture limit.
+float4 GBSceneLightPixel(GBVertex vertex_in) : TARGET {
+    float4 prepared=gb_input_texture.SampleLevel(gb_linear_clamp,vertex_in.uv,0.0);
+    if(light_pattern>.5) prepared.rgb=ApplyLeaves(prepared.rgb,vertex_in.uv);
+    else prepared.rgb=ApplySpotlight(GBApplyMainWash(prepared.rgb,vertex_in.uv),vertex_in.uv);
+    return prepared;
+}
+technique SceneLight {
+    pass { vertex_shader=GBVertexMain(vertex_in);pixel_shader=GBSceneLightPixel(vertex_in); }
+}
+
+float4 GBLightExtractPixel(GBVertex vertex_in) : TARGET
+{
+    GBPreparedScene prepared = GBPrepareScene(vertex_in.uv);
+    // Sharp RGB stays straight, extraction uses coverage only for emitted light.
+    return float4(prepared.treated_linear, prepared.alpha);
+}
+
+#include "light-field-stage.effect"
+
+#include "screen-stage.effect"
+
+float4 GBFinishPixel(GBVertex vertex_in) : TARGET
+{
+    float alpha = gb_scene_texture.SampleLevel(gb_linear_clamp, vertex_in.uv,0.0).a;
+    if (alpha <= 0.0)
+        return float4(0.0, 0.0, 0.0, alpha);
+    float3 linear_rgb = gb_input_texture.SampleLevel(gb_linear_clamp, vertex_in.uv,0.0).rgb;
+    float receive = GBSourceScreenReceive(vertex_in.uv);
+    if (gb_screen_mode != 0 && gb_effect_opacity > 0.0)
+    {
+        float4 full_field = gb_light_texture.SampleLevel(gb_linear_clamp, vertex_in.uv,0.0);
+        linear_rgb = lerp(linear_rgb, GBApplyMonitor(linear_rgb, full_field), receive);
+    }
+    // Clamp monitor lighting before wash and final glow.
+    linear_rgb = saturate(linear_rgb);
+#ifdef _D3D11
+    [branch]
+#endif
+    if (GBWashActive() && light_pattern<.5)
+        linear_rgb = GBApplySecondaryWash(linear_rgb, gb_wash_texture.SampleLevel(gb_linear_clamp, vertex_in.uv,0.0), vertex_in.uv);
+    if (gb_screen_mode == 3 && gb_effect_opacity > 0.0) {
+        float4 highlight_field = gb_highlight_texture.SampleLevel(gb_linear_clamp, vertex_in.uv,0.0);
+        linear_rgb = lerp(linear_rgb, GBApplyFinalGlow(linear_rgb, highlight_field), receive);
+    }
+    float3 display_rgb = GBEncode(GBApplyTone(linear_rgb));
+    return float4(saturate(display_rgb) * alpha, alpha);
+}
+
+
+technique LightExtract {
+    pass {
+        vertex_shader = GBVertexMain(vertex_in);
+        pixel_shader = GBLightExtractPixel(vertex_in);
+    }
+}
+technique Downsample {
+    pass {
+        vertex_shader = GBVertexMain(vertex_in);
+        pixel_shader = GBDownsamplePixel(vertex_in);
+    }
+}
+technique HighlightExtract {
+    pass {
+        vertex_shader = GBVertexMain(vertex_in);
+        pixel_shader = GBScreenHighlightExtractPixel(vertex_in);
+    }
+}
+technique MonitorExtract {
+    pass {
+        vertex_shader = GBVertexMain(vertex_in);
+        pixel_shader = GBMonitorExtractPixel(vertex_in);
+    }
+}
+technique Finish {
+    pass {
+        vertex_shader = GBVertexMain(vertex_in);
+        pixel_shader = GBFinishPixel(vertex_in);
+    }
+}

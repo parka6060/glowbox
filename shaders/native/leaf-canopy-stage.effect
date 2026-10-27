@@ -1,0 +1,157 @@
+// Connected canopy geometry is built only when its saved structure changes.
+// The vertex shader moves branches and turns individual leaves at their stems.
+uniform float canopy_clock=0.0;
+uniform float canopy_scale=1;
+uniform float4 canopy_window={0,0,1,1};
+uniform float4 canopy_previous_window={0,0,1,1};
+uniform float canopy_angle=0;
+uniform float canopy_sway=.3;
+uniform float canopy_flutter=.3;
+uniform float canopy_depth=.65;
+uniform texture2d canopy_input;
+uniform texture2d canopy_mip0;
+uniform texture2d canopy_mip1;
+uniform texture2d canopy_mip2;
+uniform texture2d canopy_mip3;
+uniform texture2d canopy_mip4;
+uniform texture2d canopy_mip5;
+uniform texture2d canopy_mip6;
+uniform texture2d canopy_mip7;
+uniform float4 canopy_lod;
+uniform texture2d canopy_previous;
+uniform float canopy_blend=1;
+sampler_state canopy_sampler { Filter=Linear; AddressU=Clamp; AddressV=Clamp; };
+struct CanopyVertex {
+    float4 pos : POSITION;
+    float4 shape : TEXCOORD0; // local ellipse coordinates, depth, leaf flag
+    float4 motion : TEXCOORD1; // stem pivot, phase, reserved
+};
+struct CanopyPixel { float4 pos : POSITION; float4 shape : TEXCOORD0; };
+float2 CanopyBend(float2 p,float layer) {
+    // A travelling gust reaches neighbouring shoots at slightly different times.
+    // Common displacement at a joint keeps stems connected to their leaves.
+    float rest=-p.x*1.9-p.y*.8+layer*.45;
+    float t=canopy_clock;
+    float gust=.65+.35*sin(t*.27+rest*.6);
+    float2 sway=float2(sin(t*.72+rest)-sin(rest),
+                      .45*(sin(t*.53+rest*.8)-sin(rest*.8)));
+    float reach=smoothstep(-.55,.9,p.x);
+    return sway*canopy_sway*gust*.013*reach*(1+.22*layer*canopy_depth);
+}
+CanopyPixel CanopyGeometryVS(CanopyVertex v) {
+    CanopyPixel o;
+    float2 p=v.pos.xy;
+    if(v.shape.w>.5) {
+        float phase=v.motion.z;
+        float t=canopy_clock*(2.1+.35*sin(phase));
+        float flutter=(sin(t+phase)-sin(phase))*canopy_flutter;
+        float a=flutter*.22;
+        float sn,cs;sincos(a,sn,cs);
+        float2 d=p-v.motion.xy;
+        // Small turns change the gaps, not the light's energy.
+        d=float2(cs*d.x-sn*d.y,sn*d.x+cs*d.y);
+        p=v.motion.xy+d+CanopyBend(v.motion.xy,v.shape.z);
+    } else p+=CanopyBend(p,v.shape.z);
+    float sn,cs;sincos(canopy_angle,sn,cs);
+    p=(p-.5)*canopy_scale;p=float2(cs*p.x-sn*p.y,sn*p.x+cs*p.y)+.5;
+    p=(p-canopy_window.xy)/canopy_window.zw;
+    o.pos=mul(float4(p,0,1),ViewProj);o.shape=v.shape;return o;
+}
+float4 CanopyGeometryPS(CanopyPixel v) : TARGET {
+    float coverage=1.0;
+    if(v.shape.w>.5) {
+        float2 p=v.shape.xy;
+        p.y/=max(.64,.82+.18*p.x);
+        float d=1-dot(p,p);
+        coverage=saturate(d/max(fwidth(d),.0001)+.5);
+    }
+    // MAX blending unions silhouettes within each depth band. Overlapping
+    // leaves never become blacker or acquire an additive halo.
+    return coverage*float4(v.shape.z<.5 ? 1:0,
+        v.shape.z>=.5 && v.shape.z<1.5 ? 1:0,
+        v.shape.z>=1.5 && v.shape.z<2.5 ? 1:0,v.shape.z>=2.5 ? 1:0);
+}
+struct CanopyScreen { float4 pos : POSITION; float2 uv : TEXCOORD0; };
+CanopyScreen CanopyScreenVS(CanopyScreen v) {
+    CanopyScreen o;o.pos=mul(float4(v.pos.xyz,1),ViewProj);o.uv=v.uv;return o;
+}
+float4 CanopyDownsamplePS(CanopyScreen v) : TARGET {
+    return canopy_input.Sample(canopy_sampler,v.uv);
+}
+float4 CanopyResolvePS(CanopyScreen v) : TARGET {
+    float4 result=float4(0,0,0,0);
+    float4 w0=saturate(1-abs(canopy_lod-0.0));
+    if(dot(w0,float4(1,1,1,1))>0) {
+        float d=0.0003417969;
+        result+=(canopy_mip0.Sample(canopy_sampler,v.uv+float2(-d,-d))+
+            canopy_mip0.Sample(canopy_sampler,v.uv+float2(d,-d))+
+            canopy_mip0.Sample(canopy_sampler,v.uv+float2(-d,d))+
+            canopy_mip0.Sample(canopy_sampler,v.uv+float2(d,d)))*.25*w0;
+    }
+    float4 w1=saturate(1-abs(canopy_lod-1.0));
+    if(dot(w1,float4(1,1,1,1))>0) {
+        float d=0.0006835937;
+        result+=(canopy_mip1.Sample(canopy_sampler,v.uv+float2(-d,-d))+
+            canopy_mip1.Sample(canopy_sampler,v.uv+float2(d,-d))+
+            canopy_mip1.Sample(canopy_sampler,v.uv+float2(-d,d))+
+            canopy_mip1.Sample(canopy_sampler,v.uv+float2(d,d)))*.25*w1;
+    }
+    float4 w2=saturate(1-abs(canopy_lod-2.0));
+    if(dot(w2,float4(1,1,1,1))>0) {
+        float d=0.0013671875;
+        result+=(canopy_mip2.Sample(canopy_sampler,v.uv+float2(-d,-d))+
+            canopy_mip2.Sample(canopy_sampler,v.uv+float2(d,-d))+
+            canopy_mip2.Sample(canopy_sampler,v.uv+float2(-d,d))+
+            canopy_mip2.Sample(canopy_sampler,v.uv+float2(d,d)))*.25*w2;
+    }
+    float4 w3=saturate(1-abs(canopy_lod-3.0));
+    if(dot(w3,float4(1,1,1,1))>0) {
+        float d=0.0027343750;
+        result+=(canopy_mip3.Sample(canopy_sampler,v.uv+float2(-d,-d))+
+            canopy_mip3.Sample(canopy_sampler,v.uv+float2(d,-d))+
+            canopy_mip3.Sample(canopy_sampler,v.uv+float2(-d,d))+
+            canopy_mip3.Sample(canopy_sampler,v.uv+float2(d,d)))*.25*w3;
+    }
+    float4 w4=saturate(1-abs(canopy_lod-4.0));
+    if(dot(w4,float4(1,1,1,1))>0) {
+        float d=0.0054687500;
+        result+=(canopy_mip4.Sample(canopy_sampler,v.uv+float2(-d,-d))+
+            canopy_mip4.Sample(canopy_sampler,v.uv+float2(d,-d))+
+            canopy_mip4.Sample(canopy_sampler,v.uv+float2(-d,d))+
+            canopy_mip4.Sample(canopy_sampler,v.uv+float2(d,d)))*.25*w4;
+    }
+    float4 w5=saturate(1-abs(canopy_lod-5.0));
+    if(dot(w5,float4(1,1,1,1))>0) {
+        float d=0.0109375000;
+        result+=(canopy_mip5.Sample(canopy_sampler,v.uv+float2(-d,-d))+
+            canopy_mip5.Sample(canopy_sampler,v.uv+float2(d,-d))+
+            canopy_mip5.Sample(canopy_sampler,v.uv+float2(-d,d))+
+            canopy_mip5.Sample(canopy_sampler,v.uv+float2(d,d)))*.25*w5;
+    }
+    float4 w6=saturate(1-abs(canopy_lod-6.0));
+    if(dot(w6,float4(1,1,1,1))>0) {
+        float d=0.0218750000;
+        result+=(canopy_mip6.Sample(canopy_sampler,v.uv+float2(-d,-d))+
+            canopy_mip6.Sample(canopy_sampler,v.uv+float2(d,-d))+
+            canopy_mip6.Sample(canopy_sampler,v.uv+float2(-d,d))+
+            canopy_mip6.Sample(canopy_sampler,v.uv+float2(d,d)))*.25*w6;
+    }
+    float4 w7=saturate(1-abs(canopy_lod-7.0));
+    if(dot(w7,float4(1,1,1,1))>0) {
+        float d=0.0437500000;
+        result+=(canopy_mip7.Sample(canopy_sampler,v.uv+float2(-d,-d))+
+            canopy_mip7.Sample(canopy_sampler,v.uv+float2(d,-d))+
+            canopy_mip7.Sample(canopy_sampler,v.uv+float2(-d,d))+
+            canopy_mip7.Sample(canopy_sampler,v.uv+float2(d,d)))*.25*w7;
+    }
+    return result;
+}
+float4 CanopyBlendPS(CanopyScreen v) : TARGET {
+    float2 previous=(v.uv*canopy_window.zw+canopy_window.xy-canopy_previous_window.xy)/canopy_previous_window.zw;
+    return lerp(canopy_previous.Sample(canopy_sampler,previous),
+        canopy_input.Sample(canopy_sampler,v.uv),canopy_blend);
+}
+technique CanopyBlend { pass { vertex_shader=CanopyScreenVS(v);pixel_shader=CanopyBlendPS(v); } }
+technique CanopyGeometry { pass { vertex_shader=CanopyGeometryVS(v);pixel_shader=CanopyGeometryPS(v); } }
+technique CanopyDownsample { pass { vertex_shader=CanopyScreenVS(v);pixel_shader=CanopyDownsamplePS(v); } }
+technique CanopyResolve { pass { vertex_shader=CanopyScreenVS(v);pixel_shader=CanopyResolvePS(v); } }

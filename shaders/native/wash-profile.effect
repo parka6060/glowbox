@@ -1,0 +1,13 @@
+// Positive odd-polynomial coordinates projected onto a unit direction keep the
+// field monotone and within [0,1], without exponentials, tanh or runtime tables.
+float2 GBWashRadialField(float distance_value, float size_value)
+{
+    float size = clamp(size_value,0.0,2.0);
+    float2 midpoint = float2(1.6000001022 + 0.4999998778 * size, 2.4999999603);
+    float2 span = float2(0.1656678159 + 0.0517638311 * size, 0.3623703320);
+    float2 coordinate = clamp((distance_value-midpoint)/span,-8.0,8.0);
+    float2 square = coordinate * coordinate;
+    float2 axis = coordinate * (1.087132215949 + square * (0.261688944239 + square *
+        (0.034608907870 + square * (0.001184084401 + square * 0.000068579174))));
+    return saturate(0.5 - 0.5 * axis * rsqrt(1.0 + axis * axis));
+}

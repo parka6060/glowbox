@@ -1,0 +1,27 @@
+uniform float mask_value;
+uniform float2 source_screen_weights;
+
+float4 SubjectMask(Vertex v) : TARGET {
+    float source_alpha = image.SampleLevel(linear_sampler, v.uv,0.0).a;
+    float selected_coverage = mask_value * source_alpha;
+    return float4(selected_coverage, source_screen_weights * source_alpha, source_alpha);
+}
+technique SubjectMask {
+    pass { vertex_shader = VS(v); pixel_shader = SubjectMask(v); }
+}
+
+technique Copy { pass { vertex_shader = VS(v); pixel_shader = Copy(v); } }
+technique Average { pass { vertex_shader = VS(v); pixel_shader = Average(v); } }
+
+float4 ViewportSubjectMask(LayerViewportVertex v) : TARGET {
+    Vertex source;
+    source.pos = v.pos;
+    source.uv = v.uv;
+    return SubjectMask(source);
+}
+technique ViewportSubjectMask {
+    pass {
+        vertex_shader = LayerViewportVS(v);
+        pixel_shader = ViewportSubjectMask(v);
+    }
+}

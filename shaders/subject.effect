@@ -1,0 +1,71 @@
+uniform float layer_gain;
+uniform float source_exposure;
+uniform float source_saturation;
+uniform float4 source_tint;
+uniform float source_reactive_amount;
+uniform float2 source_canvas;
+// Use a restrained upper tint and stronger lower tint from the background hue.
+float3 AutoTint(float2 uv) {
+    float4 sample=auto_image.Sample(linear_sampler,float2(.5,.5));
+    if(sample.a<.00001)return float3(1,1,1);
+    float3 rgb=saturate(sample.rgb/sample.a);
+    float peak=max(rgb.r,max(rgb.g,rgb.b));
+    float low=min(rgb.r,min(rgb.g,rgb.b));
+    float sat=(peak-low)/max(peak,.00001);
+    float3 hue=rgb/max(peak,.00001);
+    float3 upper=lerp(float3(1,1,1),hue,min(sat,.08)/max(sat,.00001))*max(peak,.95);
+    float3 lower=hue*max(peak,.8);
+    return lerp(upper,lower,.2*smoothstep(.25,1.0,uv.y));
+}
+float4 SourceCorrection(float4 color) {
+    if (source_exposure != 1 || source_saturation != 1 || any(source_tint.rgb != float3(1,1,1))) {
+        float3 linear_rgb = ToLinear(saturate(color.rgb / max(color.a, .00001)));
+        float luma = dot(linear_rgb, float3(.2126,.7152,.0722));
+        linear_rgb = max(lerp(float3(luma,luma,luma), linear_rgb, source_saturation), 0);
+        color.rgb = saturate(ToDisplay(linear_rgb * source_exposure * source_tint.rgb)) * color.a;
+    }
+    return color;
+}
+float4 LayerColor(float4 color, float2 uv) {
+    color.rgb *= layer_gain * lerp(float3(1,1,1), AutoTint(uv), auto_blend);
+    return color;
+}
+float4 Layer(Vertex v) : TARGET {
+    return LayerColor(image.Sample(linear_sampler, v.uv), v.uv);
+}
+technique Layer { pass { vertex_shader = VS(v); pixel_shader = Layer(v); } }
+
+// Whole-group replay captures the current viewport without resampling. Recover
+// source-local UV from the incoming affine projection for Color Match.
+// gs_draw_sprite already scales ViewProj by the captured viewport extent.
+uniform float2 layer_source_scale;
+struct LayerViewportVertex {
+    float4 pos : POSITION;
+    float2 uv : TEXCOORD0;
+    float2 source_uv : TEXCOORD1;
+};
+LayerViewportVertex LayerViewportVS(Vertex v) {
+    LayerViewportVertex result;
+    float2 clip = float2(2 * v.uv.x - 1, 1 - 2 * v.uv.y);
+    float2 origin = mul(float4(0, 0, 0, 1), ViewProj).xy;
+    float2 axis_x = mul(float4(layer_source_scale.x, 0, 0, 0), ViewProj).xy;
+    float2 axis_y = mul(float4(0, layer_source_scale.y, 0, 0), ViewProj).xy;
+    float2 delta = clip - origin;
+    float determinant = axis_x.x * axis_y.y - axis_y.x * axis_x.y;
+    result.source_uv = abs(determinant) > .0000001 ? float2(delta.x * axis_y.y - delta.y * axis_y.x,
+                                                            axis_x.x * delta.y - axis_x.y * delta.x) /
+                                                         determinant
+                                                   : v.uv;
+    result.pos = float4(clip, 0, 1);
+    result.uv = v.uv;
+    return result;
+}
+float4 ViewportLayer(LayerViewportVertex v) : TARGET {
+    return LayerColor(image.Sample(linear_sampler, v.uv), v.source_uv);
+}
+technique ViewportLayer {
+    pass {
+        vertex_shader = LayerViewportVS(v);
+        pixel_shader = ViewportLayer(v);
+    }
+}

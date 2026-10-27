@@ -1,0 +1,440 @@
+// Authored 2D spotlight and wall shadow. RGB is straight linear light.
+// Subject depth is an explicit virtual wall distance, not inferred tracking Z.
+uniform float spotlight_amount = 0.0;
+uniform float spotlight_surface = 1.0;
+uniform float rays_detail = 0.0;
+uniform float scene_light_type = 0.0;
+uniform float ray_width = 0.35;
+uniform float ray_time = 0.0;
+uniform float2 light_travel = {0.0,1.0};
+uniform float2 spotlight_position = {0.5, 0.35};
+uniform float2 spotlight_canvas = {1920.0, 1080.0};
+uniform float spotlight_size = 0.55;
+uniform float spotlight_softness = 0.25;
+uniform float2 spotlight_emitter = {0.5,0.35};
+uniform float3 spotlight_axis = {0.0,0.0,-1.0};
+uniform float spotlight_height = 1.1;
+uniform float spotlight_falloff = 0.0;
+uniform bool spotlight_source_overrides = false;
+uniform texture2d spotlight_source_mask;
+uniform float spotlight_brightness = 0.35;
+uniform float spotlight_darkness = 6.0;
+uniform float3 spotlight_light_color = {1.0,1.0,1.0};
+uniform float3 spotlight_edge_color = {1.0, 0.3, 0.12};
+uniform float spotlight_shadow = 0.0;
+uniform float subject_depth = 0.25;
+uniform float spotlight_plane_scale = 0.8875;
+uniform float2 scene_view_offset = {0.0,0.0};
+float2 SceneReferenceUV(float2 uv,float plane) {
+    if(scene_view_offset.x==0.0 && scene_view_offset.y==0.0)return uv;
+    return uv+scene_view_offset/(float2(spotlight_canvas.x/spotlight_canvas.y,1.0)*plane);
+}
+float2 SceneViewUV(float2 uv,float plane) {
+    if(scene_view_offset.x==0.0 && scene_view_offset.y==0.0)return uv;
+    return uv-scene_view_offset/(float2(spotlight_canvas.x/spotlight_canvas.y,1.0)*plane);
+}
+uniform float shadow_scale = 1.0;
+uniform float shadow_softness = 0.2;
+uniform float shadow_follow = 1.0;
+uniform float2 shadow_pivot = {0.5,0.5};
+uniform float2 shadow_offset = {0.0, 0.0};
+uniform bool spotlight_has_subject = false;
+uniform texture2d spotlight_mask;
+sampler_state spotlight_sampler { Filter = Linear; AddressU = Clamp; AddressV = Clamp; };
+float SpotlightCoverage(float2 uv) {
+    if (!spotlight_has_subject) return 0.0;
+    if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return 0.0;
+    return saturate(spotlight_mask.SampleLevel(spotlight_sampler, uv,0.0).r);
+}
+// Project one cone onto the subject or background plane. Size is its
+// perpendicular beam radius at the wall aim point. At zero tilt, distance
+// is radial in the projection plane.
+float SpotlightDistance(float2 uv, float plane) {
+    uv=SceneReferenceUV(uv,plane);
+    float2 metric=float2(spotlight_canvas.x/spotlight_canvas.y,1.0);
+    if (spotlight_axis.z <= -0.999999)
+        return length((uv-spotlight_position)*metric)/plane;
+    float3 ray=float3((uv-spotlight_emitter)*metric,-spotlight_height*plane);
+    float along=dot(ray,spotlight_axis);
+    float perpendicular=length(ray-spotlight_axis*along);
+    float reference=spotlight_height/max(-spotlight_axis.z,.001);
+    return perpendicular*reference/max(along,.00001);
+}
+float SpotlightFalloff(float2 uv, float plane) {
+    if (spotlight_falloff <= 0.0) return 1.0;
+    uv=SceneReferenceUV(uv,plane);
+    float2 metric=float2(spotlight_canvas.x/spotlight_canvas.y,1.0);
+    float3 ray=float3((uv-spotlight_emitter)*metric,-spotlight_height*plane);
+    float reference=spotlight_height/max(-spotlight_axis.z,.001);
+    float ratio=reference/max(length(ray),.00001);
+    // Inverse-square attenuation and the cosine of incidence, normalized so
+    // the wall aim point keeps the chosen Brightness.
+    return lerp(1.0,clamp(plane*ratio*ratio*ratio,0.0,4.0),spotlight_falloff);
+}
+float SpotlightReceive(float2 uv) {
+    if (!spotlight_source_overrides) return 1.0;
+    float4 weights=spotlight_source_mask.SampleLevel(spotlight_sampler,uv,0.0);
+    return saturate(1.0-weights.r/max(weights.g,.00001));
+}
+float SpotlightDisk(float distance, float radius, float feather) {
+    return 1.0 - smoothstep(radius - feather, radius + feather, distance);
+}
+// Shared color progression for the circle and the blocked-light boundary.
+float3 SpotlightFringe(float distance, float darkness) {
+    float warm_distance = (distance+0.2)/1.3;
+    float cool_distance = (distance-1.5)/4.5;
+    float warm = exp2(-2.0*warm_distance*warm_distance);
+    float cool = exp2(-2.0*cool_distance*cool_distance);
+    float3 edge = max(spotlight_edge_color, 0.0);
+    float3 purple = float3(edge.r*0.35+edge.b*0.65, edge.r*0.12, edge.r*0.45+edge.b*0.55);
+    return edge*warm*0.35 + purple*cool*darkness*0.12;
+}
+uniform bool spotlight_shadow_field_ready = false;
+uniform texture2d spotlight_shadow_field;
+uniform texture2d shadow_blur_input;
+uniform float2 shadow_blur_step;
+uniform float shadow_blur_sigma;
+uniform float2 shadow_capture_texel;
+
+float SpotlightShadowScale() {
+    float follow=saturate(shadow_follow);
+    return max(.25,lerp(shadow_scale,1.0,follow)/lerp(1.0,spotlight_plane_scale,follow));
+}
+float2 SpotlightShadowProjection(float2 uv) {
+    uv=SceneReferenceUV(uv,1.0);
+    float scale = SpotlightShadowScale();
+    float2 metric = float2(spotlight_canvas.x/spotlight_canvas.y,1.0);
+    float2 pivot = lerp(shadow_pivot,spotlight_emitter,shadow_follow);
+    return SceneViewUV(pivot+(uv-pivot-shadow_offset/metric*(1.0-shadow_follow))/scale,spotlight_plane_scale);
+}
+struct ShadowFieldVertex { float4 pos : POSITION; float2 uv : TEXCOORD0; };
+ShadowFieldVertex ShadowFieldVS(ShadowFieldVertex v) {
+    ShadowFieldVertex o; o.pos=mul(float4(v.pos.xyz,1.0),ViewProj);o.uv=v.uv;return o;
+}
+float SpotlightCircleVisibility(float2 uv) {
+    float2 metric=float2(spotlight_canvas.x/spotlight_canvas.y,1.0);
+    float radius=max(.01,spotlight_size);
+    float feather=max(.001,radius*spotlight_softness*.16);
+    float distance=(SpotlightDistance(uv,1.0)-radius)/feather;
+    return 1.0/(1.0+exp2(clamp(distance,-16.0,16.0)*1.44269504));
+}
+float3 ShadowFieldAt(float2 uv) {
+    float shade=SpotlightCoverage(SpotlightShadowProjection(uv));
+    float circle=SpotlightCircleVisibility(uv);
+    return float3(shade,circle*(1.0-shade),circle);
+}
+float4 ShadowFieldCapture(ShadowFieldVertex v) : TARGET {
+    float2 d=shadow_capture_texel*.25;
+    float3 field=ShadowFieldAt(v.uv+float2(-d.x,-d.y));
+    field+=ShadowFieldAt(v.uv+float2(d.x,-d.y));
+    field+=ShadowFieldAt(v.uv+float2(-d.x,d.y));
+    field+=ShadowFieldAt(v.uv+d);
+    return float4(field*.25,1.0);
+}
+float4 ShadowFieldBlur(ShadowFieldVertex v) : TARGET {
+    float3 sum=float3(0.0,0.0,0.0);
+    float weight=0.0;
+    for(int i=-32;i<=32;++i) {
+        float w=exp2(-0.72134752*i*i/(shadow_blur_sigma*shadow_blur_sigma));
+        float2 uv=v.uv+float(i)*shadow_blur_step;
+        // A shadow beyond the canvas must not be clamped into a dark border.
+        float3 value=float3(0.0,0.0,0.0);
+        if(uv.x>=0.0 && uv.y>=0.0 && uv.x<=1.0 && uv.y<=1.0)
+            value=shadow_blur_input.SampleLevel(spotlight_sampler,uv,0.0).rgb;
+        sum+=value*w;weight+=w;
+    }
+    return float4(sum/weight,1.0);
+}
+technique SpotlightShadowCapture { pass { vertex_shader=ShadowFieldVS(v);pixel_shader=ShadowFieldCapture(v); } }
+technique SpotlightShadowBlur { pass { vertex_shader=ShadowFieldVS(v);pixel_shader=ShadowFieldBlur(v); } }
+
+float3 SpotlightPool(float distance) {
+    float disk=SpotlightDisk(distance,0.0,1.0);
+    return spotlight_light_color*disk+SpotlightFringe(distance,1.0-disk);
+}
+// Parallel light has a band, not a circular cone. Depth displaces the
+// incident field along the same travel direction used for occlusion.
+float2 DirectionalCoordinates(float2 uv,float plane) {
+    uv=SceneReferenceUV(uv,plane);
+    float2 metric=float2(spotlight_canvas.x/spotlight_canvas.y,1.0);
+    float2 p=(uv-spotlight_position)*metric-light_travel*(1.0-plane)*.8;
+    return float2(dot(p,float2(light_travel.y,-light_travel.x)),dot(p,light_travel));
+}
+uniform float light_coverage=0.0;
+float DirectionalEnvelope(float2 uv,float plane) {
+    float2 p=DirectionalCoordinates(uv,plane);
+    float radius=max(.01,spotlight_size);
+    float feather=max(.001,radius*spotlight_softness);
+    float band=1.0-smoothstep(radius-feather,radius+feather,abs(p.x));
+    return lerp(band,1.0,light_coverage)*exp2(-max(0.0,p.y)*spotlight_falloff);
+}
+float DirectionalVisibility(float2 uv,float plane) {
+    float2 metric=float2(spotlight_canvas.x/spotlight_canvas.y,1.0);
+    float2 crossing=SceneReferenceUV(uv,plane)-light_travel*(plane-spotlight_plane_scale)*.8/metric;
+    crossing=SceneViewUV(crossing,spotlight_plane_scale);
+    return 1.0-SpotlightCoverage(crossing);
+}
+
+// One incident field drives surfaces and shafts.
+uniform float light_pattern=0.0;
+uniform float pattern_size=0.35;
+uniform float pattern_amount=0.7;
+uniform float motion_drift=0.35;
+uniform float motion_opposing=0.5;
+uniform float motion_fading=0.3;
+
+uniform float light_opacity=1.0;
+uniform float light_energy=1.0;
+float2 PatternCoordinates(float2 uv,float plane) {
+    float2 p=DirectionalCoordinates(uv,plane);
+    if(scene_light_type<.5) {
+        uv=SceneReferenceUV(uv,plane);
+        float2 metric=float2(spotlight_canvas.x/spotlight_canvas.y,1.0);
+        p=(spotlight_emitter+(uv-spotlight_emitter)/max(plane,.1)-spotlight_position)*metric;
+        p=float2(dot(p,float2(light_travel.y,-light_travel.x)),dot(p,light_travel));
+    }
+    return p/max(.04,pattern_size*.55);
+}
+// The animated geometry is filtered once, then shared by surfaces and rays.
+uniform texture2d leaf_canopy;
+uniform texture2d leaf_canopy_soft;
+uniform float4 leaf_window={0,0,1,1};
+uniform float leaf_shadow_variation=.65;
+uniform float leaf_bottom_fade=0;
+sampler_state leaf_sampler { Filter=Linear; AddressU=Clamp; AddressV=Clamp; };
+uniform float leaf_variation=.25;
+uniform float leaf_shadow_level=.5;
+uniform float leaf_edge_amount=.08;
+uniform float3 leaf_shadow_color={.16,.32,.63};
+uniform float3 leaf_tint={.27,.52,.22};
+float2 LeafCoordinates(float2 p) {
+    return p*(.35*.55)/max(.01,spotlight_size*2)*float2(.5625,1)+.5;
+}
+float2 LeafLightField(float2 p) {
+    float2 q=(LeafCoordinates(p)-leaf_window.xy)/leaf_window.zw;
+    float4 near=1-leaf_canopy.SampleLevel(leaf_sampler,q,0);
+    float4 broad=1-leaf_canopy_soft.SampleLevel(leaf_sampler,q,0);
+    return float2(near.r*near.g*near.b*near.a,broad.r*broad.g*broad.b*broad.a);
+}
+float LeavesTransmission(float2 p) { return LeafLightField(p).x; }
+float LightPattern(float2 uv,float plane) {
+    if(light_pattern<.5 || pattern_amount<=0.0)return 1.0;
+    float2 p=PatternCoordinates(uv,plane);
+    return lerp(1.0,LeavesTransmission(p),pattern_amount);
+}
+float SurfacePattern(float2 uv) {
+    return LightPattern(uv,lerp(1.0,spotlight_plane_scale,SpotlightCoverage(uv)));
+}
+float WashEnvelope(float2 uv,float plane) {
+    uv=SceneReferenceUV(uv,plane);
+    float2 origin=spotlight_position-light_travel*2.0;
+    float d=length(uv-origin);
+    float illumination = GBWashRadialField(d,spotlight_size*2.0).x;
+    return illumination*illumination;
+}
+float LightEnvelope(float2 uv,float plane) {
+    float envelope;
+    if(scene_light_type>1.5)envelope=DirectionalEnvelope(uv,plane);
+    else if(scene_light_type>.5)envelope=WashEnvelope(uv,plane);
+    else envelope=SpotlightDisk(SpotlightDistance(uv,plane),spotlight_size,max(.001,spotlight_size*spotlight_softness*.16));
+    if(light_pattern>.5) {
+        // Light-local fade, shared by surfaces and atmospheric rays. Source
+        // movement/rotation turns it, Leaf Size does not change its height.
+        float2 local=PatternCoordinates(uv,plane)*max(.04,pattern_size*.55);
+        float height=saturate(.5+local.y/max(.01,spotlight_size*2.0));
+        envelope*=1.0-leaf_bottom_fade*smoothstep(.1,1.0,height);
+    }
+    return envelope;
+}
+float LeafLuminance(float3 c) { return max(.0001,dot(c,float3(.2126,.7152,.0722))); }
+float3 LeafHue(float3 c,float level) { return c*level/LeafLuminance(c); }
+float LeafSunLevel() {
+    return scene_light_type>.5 && scene_light_type<1.5
+        ? 1.0+light_energy*2.0 : exp2(spotlight_brightness);
+}
+float3 ApplyLeaves(float3 rgb,float2 uv) {
+    float amount=saturate(spotlight_amount*spotlight_surface*pattern_amount)*SpotlightReceive(uv);
+    if(amount<=0.0)return rgb;
+    float fg=SpotlightCoverage(uv);
+    float plane=lerp(1.0,spotlight_plane_scale,fg);
+    float2 p=PatternCoordinates(uv,plane);
+    float2 field=LeafLightField(p);
+    float f=field.x;
+    float blocked=scene_light_type>1.5 ? 1.0-DirectionalVisibility(uv,1.0) : SpotlightCoverage(SpotlightShadowProjection(uv));
+    f*=1.0-blocked*saturate(spotlight_shadow)*(1.0-fg);
+    float level=LeafSunLevel();
+    float3 shade=LeafHue(leaf_shadow_color,leaf_shadow_level);
+    float3 sun=LeafHue(spotlight_light_color,level);
+    float soft=field.y;
+    // Ambient remains in shade. Sunlight is added only through visible gaps.
+    shade*=1.0-leaf_shadow_variation*.18*(1.0-soft);
+    float3 light=lerp(shade,sun,f);
+    // Broad partial light carries reflected hues across the penumbra.
+    // The colour transition preserves luminance and never outlines every leaf.
+    float partial=saturate(4*soft*(1-soft));
+    float edge=partial*leaf_edge_amount*.55;
+    float3 tinted=lerp(light,LeafHue(spotlight_edge_color,LeafLuminance(light)),edge);
+    float bounce=saturate((soft-f)*3)*leaf_variation*.32;
+    light=lerp(tinted,LeafHue(leaf_tint,LeafLuminance(tinted)),bounce);
+    // Multiply illumination without replacing receiver hue, alpha is untouched.
+    return lerp(rgb,rgb*light,amount*LightEnvelope(uv,plane));
+}
+float3 ApplyDirectional(float3 rgb,float2 uv) {
+    float fg=SpotlightCoverage(uv);
+    float plane=lerp(1.0,spotlight_plane_scale,fg);
+    float beam=DirectionalEnvelope(uv,plane)*SurfacePattern(uv);
+    float visibility=lerp(1.0,DirectionalVisibility(uv,1.0),saturate(spotlight_shadow*shadow_follow)*(1.0-fg));
+    float3 gain=1.0+(exp2(spotlight_brightness)-1.0)*spotlight_light_color*beam*visibility;
+    return lerp(rgb,rgb*gain,saturate(spotlight_amount*spotlight_surface)*SpotlightReceive(uv));
+}
+float3 ApplySpotlight(float3 linear_rgb, float2 uv) {
+    if(scene_light_type>1.5)return ApplyDirectional(linear_rgb,uv);
+    if(scene_light_type>.5)return linear_rgb; // Wash is evaluated in its own stage.
+
+    if (spotlight_amount <= 0.0 && spotlight_shadow <= 0.0) return linear_rgb;
+    float aspect = spotlight_canvas.x / spotlight_canvas.y;
+    float2 metric = float2(aspect, 1.0);
+    float coverage = SpotlightCoverage(uv);
+    float radius = max(0.01, spotlight_size);
+    float feather = max(0.001, radius * spotlight_softness * 0.16);
+    float distance = SpotlightDistance(uv,1.0);
+    float wall_disk = SpotlightDisk(distance, radius, feather);
+    // The subject light and its wall shadow share reciprocal projection.
+    // Wall footprint and manually selected peak illumination remain unchanged.
+    float plane=lerp(1.0,spotlight_plane_scale,saturate(spotlight_amount));
+    float surface_distance = SpotlightDistance(uv,plane);
+    float surface_disk = SpotlightDisk(surface_distance, radius, feather);
+    float disk = lerp(wall_disk, surface_disk, coverage);
+    float edge_distance = lerp(distance, surface_distance, coverage);
+    float3 pool = spotlight_light_color*disk
+        + SpotlightFringe((edge_distance-radius)/feather, 1.0-disk);
+    // Keep ambient illumination independent of the light blocked by the shadow.
+    float ambient = exp2(-spotlight_darkness);
+    float occlusion = 0.0;
+    float3 field = float3(0.0,1.0,1.0);
+    if (spotlight_shadow > 0.0 && coverage < 0.999) {
+        float scale = SpotlightShadowScale();
+        float2 projected = SpotlightShadowProjection(uv);
+        float blur = (0.0005 + shadow_softness * 0.008) * (1.0 + 2.0*subject_depth*shadow_follow);
+        float2 step = float2(blur/aspect,blur) * 0.5 / scale;
+        // Binomial weights avoid repeated shadow silhouettes.
+
+        float shade = 0.0;
+        if (spotlight_shadow_field_ready) {
+            field = spotlight_shadow_field.SampleLevel(spotlight_sampler,uv,0.0).rgb;
+            shade = field.r;
+        } else for (int y=-2; y<=2; ++y) {
+            float wy = y==0 ? 6.0 : (abs(y)==1 ? 4.0 : 1.0);
+            for (int x=-2; x<=2; ++x) {
+                float wx = x==0 ? 6.0 : (abs(x)==1 ? 4.0 : 1.0);
+                shade += SpotlightCoverage(projected + float2(x,y)*step) * (wx*wy/256.0);
+            }
+        }
+        shade = saturate(shade);
+        float shadow_amount = saturate(spotlight_shadow*(1.0-coverage));
+        occlusion = shadow_amount * shade;
+        if (shadow_follow > 0.0) {
+            float retained=spotlight_shadow_field_ready
+                ? saturate(field.g/max(field.b,0.000001)) : 1.0-shade;
+            retained=lerp(1.0,retained,shadow_amount*shadow_follow);
+            if (retained < .99999) {
+                float circle=1.0/(1.0+exp2(clamp((edge_distance-radius)/feather,-16.0,16.0)*1.44269504));
+                float visible=circle*retained;
+                // Color the joined light boundary once. Fully blocked light
+                // has no separate colored overlay or residual direct energy.
+                pool=visible<=0.0 ? float3(0.0,0.0,0.0)
+                    : SpotlightPool(log(max(1.0-visible,.000001)/max(visible,.000001)));
+            }
+        }
+
+    }
+    // Linked shadows remove direct light, including its colored fringe. Outside
+    // the light there is no direct contribution to remove. Manual drop shadows
+    // retain their independent image-darkening behavior.
+    float falloff=lerp(SpotlightFalloff(uv,1.0),SpotlightFalloff(uv,plane),coverage);
+    float3 gain = ambient + (exp2(spotlight_brightness)-ambient)*pool*falloff*SurfacePattern(uv);
+    float3 lit = lerp(linear_rgb, linear_rgb * gain, saturate(spotlight_amount*spotlight_surface));
+    return lerp(linear_rgb,lit,SpotlightReceive(uv)) * (1.0-occlusion*(1.0-shadow_follow));
+}
+
+
+// A single-scattering approximation between the selected subject plane and
+// the wall. Fixed midpoint samples need no history or RGB scene extraction.
+uniform float rays_amount = 0.0;
+uniform texture2d rays_field;
+
+// Inspired by pend00's CC0 Godot example:
+// https://godotshaders.com/shader/god-rays/
+// Value noise uses the projector's angular coordinates.
+float RayCloudHash(float x) {
+    return frac(sin(x*113.37+19.19)*31971.731);
+}
+float RayCloudNoise(float2 p) {
+    float2 cell=floor(p),f=frac(p);
+    // Quintic interpolation keeps both first and second derivatives continuous.
+    float2 w=f*f*f*(f*(f*6.0-15.0)+10.0);
+    float key=cell.x+cell.y*59.0;
+    return lerp(lerp(RayCloudHash(key),RayCloudHash(key+1.0),w.x),
+                lerp(RayCloudHash(key+59.0),RayCloudHash(key+60.0),w.x),w.y);
+}
+float RayAperture(float2 uv,float t) {
+    uv=SceneReferenceUV(uv,t);
+    float2 metric=float2(spotlight_canvas.x/spotlight_canvas.y,1.0);
+    float3 ray=float3((uv-spotlight_emitter)*metric,-spotlight_height*t);
+    float3 side=float3(-spotlight_axis.y,spotlight_axis.x,0.0);
+    side=dot(side,side)>.00001 ? normalize(side) : float3(1.0,0.0,0.0);
+    float reference=spotlight_height/max(-spotlight_axis.z,.001);
+    float along=max(dot(ray,spotlight_axis),.00001);
+    float u=dot(ray,side)*reference/(along*max(spotlight_size,.001));
+    float3 upright=cross(spotlight_axis,side);
+    float v=dot(ray,upright)*reference/(along*max(spotlight_size,.001));
+    u=u/max(.05,ray_width)*.35+ray_time*.15;
+    v+=ray_time*.08;
+    // Irregular cloud-like openings, stretched along the projected shafts.
+    // The broad layer supplies large dark gaps, the fine layer gently breaks
+    // their edges. Both stay in light coordinates, not output-screen stripes.
+    float broad=RayCloudNoise(float2(u*8.0+17.2,v*1.1+3.6));
+    float fine=RayCloudNoise(float2(u*24.0+41.7,v*2.3+8.1));
+    return smoothstep(.28,.78,broad*.85+fine*.15);
+}
+float DirectionalAperture(float2 uv,float plane) {
+    float2 p=DirectionalCoordinates(uv,plane);
+    float u=p.x/max(.05,ray_width)*5.0;
+    float drift=motion_drift*sin(ray_time*.7)*2.0;
+    float broad=RayCloudNoise(float2(u+drift+17.2,p.y*.6+ray_time*.15*motion_fading));
+    float fine=RayCloudNoise(float2(u*2.7+41.7+drift*(1.0-2.0*motion_opposing),p.y*1.3-ray_time*.35*motion_fading));
+    return smoothstep(.2,.8,.8*broad+.2*fine);
+}
+float4 LightRaysCapture(ShadowFieldVertex v) : TARGET {
+    float plane=spotlight_plane_scale;
+    float mid=(plane+1.0)*.5;
+    float aperture=1.0;
+    [branch] if(light_pattern>.5) aperture=LightPattern(v.uv,mid);
+    else if(scene_light_type>.5) aperture=lerp(1.0,DirectionalAperture(v.uv,mid),rays_detail);
+    else aperture=lerp(1.0,RayAperture(v.uv,mid),rays_detail);
+    float sum=0.0;
+    for(int i=0;i<16;++i) {
+        float t=lerp(plane,1.0,(i+.5)/16.0);
+        float2 crossing=scene_light_type>.5
+            ? SceneReferenceUV(v.uv,t)-light_travel*(t-plane)*.8/float2(spotlight_canvas.x/spotlight_canvas.y,1.0)
+            : spotlight_emitter+(SceneReferenceUV(v.uv,t)-spotlight_emitter)*(plane/t);
+        crossing=SceneViewUV(crossing,plane);
+        sum+=1.0-SpotlightCoverage(crossing);
+    }
+    return float4(sum/16.0*LightEnvelope(v.uv,mid)*aperture,0,0,1);
+}
+technique LightRaysCapture { pass { vertex_shader=ShadowFieldVS(v);pixel_shader=LightRaysCapture(v); } }
+float3 ApplyLightRays(float3 linear_rgb,float2 uv,float alpha) {
+    if (rays_amount<=0.0 || alpha<=.00001) return linear_rgb;
+    float receiving;
+    if (spotlight_source_overrides)
+        receiving=spotlight_source_mask.SampleLevel(spotlight_sampler,uv,0.0).b/max(alpha,.00001);
+    else receiving=1.0-SpotlightCoverage(uv)/max(alpha,.00001);
+    float beam=rays_field.SampleLevel(spotlight_sampler,uv,0.0).r;
+    // Add haze once, after reactive exposure and screen finishing. No feedback
+    // into reactive metering/bloom, original scene alpha remains unchanged.
+    // Foliage uses absolute illumination: sun level 1 still scatters light
+    // even though it does not increase the receiving surface's exposure.
+    float energy=light_pattern>.5 ? LeafSunLevel() : light_energy;
+    return linear_rgb+spotlight_light_color*(.35*rays_amount*beam*saturate(receiving)*light_opacity*energy);
+}

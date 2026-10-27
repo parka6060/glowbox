@@ -1,0 +1,105 @@
+// Linear light fields shared by the sharp finish, monitor and Glow branches.
+uniform texture2d gb_field_texture0;
+uniform texture2d gb_field_texture1;
+uniform texture2d gb_field_texture2;
+uniform texture2d gb_field_texture3;
+uniform texture2d gb_field_texture4;
+uniform texture2d gb_field_texture5;
+uniform float gb_field_weight0;
+uniform float gb_field_weight1;
+uniform float gb_field_weight2;
+uniform float gb_field_weight3;
+uniform float gb_field_weight4;
+uniform float gb_field_weight5;
+
+float3 GBMedianThree(float3 a, float3 b, float3 c)
+{
+    return a + b + c - min(a, min(b, c)) - max(a, max(b, c));
+}
+
+// Prepared RGB is straight with source coverage, resolved emission/field
+// textures have A=1. Weight before nonlinear extraction, exactly once.
+float3 GBEmissionSample(float2 uv)
+{
+    float4 color = gb_input_texture.SampleLevel(gb_linear_clamp, uv,0.0);
+    return color.rgb * color.a;
+}
+
+float3 GBMedianPrefilter(float2 uv)
+{
+    float2 dx = float2(gb_input_texel_size.x, 0.0);
+    float2 dy = float2(0.0, gb_input_texel_size.y);
+    float3 horizontal = GBMedianThree(GBEmissionSample(uv),
+        GBEmissionSample(uv - dx),
+        GBEmissionSample(uv + dx));
+    return GBMedianThree(horizontal, GBEmissionSample(uv - dy),
+        GBEmissionSample(uv + dy));
+}
+
+float4 GBFieldFirstDown(GBVertex vertex_in) : TARGET
+{
+    float2 d = gb_input_texel_size;
+    float3 a = gb_input_texture.SampleLevel(gb_linear_clamp, vertex_in.uv - d,0.0).rgb;
+    float3 b = gb_input_texture.SampleLevel(gb_linear_clamp, vertex_in.uv + float2(d.x, -d.y),0.0).rgb;
+    float3 c = gb_input_texture.SampleLevel(gb_linear_clamp, vertex_in.uv + float2(-d.x, d.y),0.0).rgb;
+    float3 e = gb_input_texture.SampleLevel(gb_linear_clamp, vertex_in.uv + d,0.0).rgb;
+    float4 weight = 1.0 / (1.0 + float4(GBColorMax(a), GBColorMax(b), GBColorMax(c), GBColorMax(e)));
+    return float4((a * weight.x + b * weight.y + c * weight.z + e * weight.w) /
+                  dot(weight, float4(1.0, 1.0, 1.0, 1.0)), 1.0);
+}
+
+float4 GBFieldReconstruct(GBVertex vertex_in) : TARGET
+{
+    // Keep the measured directional footprint, each scale reconstructs independently.
+    float2 d = gb_blur_step;
+    float3 center = gb_input_texture.SampleLevel(gb_linear_clamp, vertex_in.uv,0.0).rgb;
+    float3 sum = 4.0 * center;
+    sum += 3.0 * gb_input_texture.SampleLevel(gb_linear_clamp, vertex_in.uv + d,0.0).rgb;
+    sum += 3.0 * gb_input_texture.SampleLevel(gb_linear_clamp, vertex_in.uv + float2(-d.x, d.y),0.0).rgb;
+    sum += 2.0 * gb_input_texture.SampleLevel(gb_linear_clamp, vertex_in.uv + float2(-d.y, d.y),0.0).rgb;
+    sum += gb_input_texture.SampleLevel(gb_linear_clamp, vertex_in.uv + float2(d.x, -d.y),0.0).rgb;
+    sum += 2.0 * gb_input_texture.SampleLevel(gb_linear_clamp, vertex_in.uv + float2(d.y, -d.y),0.0).rgb;
+    sum += gb_input_texture.SampleLevel(gb_linear_clamp, vertex_in.uv - d,0.0).rgb;
+    return float4(center + sum / 16.0, 1.0);
+}
+
+float4 GBFieldMix(GBVertex vertex_in) : TARGET
+{
+    float3 light = gb_field_texture0.SampleLevel(gb_linear_clamp, vertex_in.uv,0.0).rgb * gb_field_weight0;
+    if (gb_field_weight1 != 0)
+    light += gb_field_texture1.SampleLevel(gb_linear_clamp, vertex_in.uv,0.0).rgb * gb_field_weight1;
+    if (gb_field_weight2 != 0)
+    light += gb_field_texture2.SampleLevel(gb_linear_clamp, vertex_in.uv,0.0).rgb * gb_field_weight2;
+    if (gb_field_weight3 != 0)
+    light += gb_field_texture3.SampleLevel(gb_linear_clamp, vertex_in.uv,0.0).rgb * gb_field_weight3;
+    if (gb_field_weight4 != 0)
+    light += gb_field_texture4.SampleLevel(gb_linear_clamp, vertex_in.uv,0.0).rgb * gb_field_weight4;
+    if (gb_field_weight5 != 0)
+    light += gb_field_texture5.SampleLevel(gb_linear_clamp, vertex_in.uv,0.0).rgb * gb_field_weight5;
+    return float4(light, 1.0);
+}
+
+float4 GBWashSpread(GBVertex vertex_in) : TARGET
+{
+    float2 d = gb_input_texel_size * 1.5;
+    float3 color = GBEmissionSample(vertex_in.uv - d);
+    color += GBEmissionSample(vertex_in.uv + float2(d.x, -d.y));
+    color += GBEmissionSample(vertex_in.uv + float2(-d.x, d.y));
+    color += GBEmissionSample(vertex_in.uv + d);
+    color *= 0.25;
+    float luma = GBLinearLuminance(color);
+    return float4(lerp(float3(luma, luma, luma), color, 0.9655), 1.0);
+}
+
+technique FieldFirstDown {
+    pass { vertex_shader = GBVertexMain(vertex_in); pixel_shader = GBFieldFirstDown(vertex_in); }
+}
+technique FieldReconstruct {
+    pass { vertex_shader = GBVertexMain(vertex_in); pixel_shader = GBFieldReconstruct(vertex_in); }
+}
+technique FieldMix {
+    pass { vertex_shader = GBVertexMain(vertex_in); pixel_shader = GBFieldMix(vertex_in); }
+}
+technique WashSpread {
+    pass { vertex_shader = GBVertexMain(vertex_in); pixel_shader = GBWashSpread(vertex_in); }
+}

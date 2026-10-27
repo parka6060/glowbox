@@ -1,0 +1,12 @@
+# Support shader modules for the current renderer.
+native/bounded-reactive.effect
+support-common.effect
+perceptual.effect
+subject.effect
+reactive.effect
+native/leaf-canopy-stage.effect
+native/wash-profile.effect
+native/spotlight-stage.effect
+native/capture-techniques.effect
+exclusion.effect
+transition.effect

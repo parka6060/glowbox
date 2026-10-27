@@ -1,0 +1,137 @@
+// Directional mask lighting with alpha-fringe protection.
+bool GBRimActive()
+{
+    return gb_rim_enabled && gb_has_subject && gb_rim_size > 0.0 && gb_rim_opacity > 0.0;
+}
+
+float GBRimCoverage(float2 uv)
+{
+    if (gb_rim_boundary_ready)
+        return gb_rim_boundary_mask.SampleLevel(gb_linear_clamp,
+            uv * gb_rim_boundary_uv.xy + gb_rim_boundary_uv.zw,0.0).r;
+    return gb_rim_boundary_mask.SampleLevel(gb_linear_clamp, uv,0.0).r;
+}
+
+float GBDirectionalRimVisibility(float2 uv, float2 direction)
+{
+    bool paired = gb_rim_style == 1 || gb_rim_style == 3;
+    if (gb_rim_style >= 2) {
+        float distance_y = paired ? 0.03 : 0.045;
+        return 1.0 - GBRimCoverage(uv + direction * float2(0.55 * distance_y, distance_y));
+    }
+    float transmission = 1.0;
+    int last = paired ? 8 : 17;
+    for (int index = last; index >= 0; --index) {
+        float distance_y = index < 4 ? 0.01 + 0.005 * index : 0.0175 + 0.0025 * index;
+        float divisor = max(1.0, (paired ? 9.0 : 18.0) - index);
+        float coverage = GBRimCoverage(uv + direction * float2(0.55 * distance_y, distance_y));
+        transmission *= 1.0 - coverage / divisor;
+        // An opaque outer sample blocks the whole ray, usually after one lookup.
+        if (transmission <= 0.0)
+            return 0.0;
+    }
+    return transmission;
+}
+
+float3 GBRimNeutral(float3 surface_display, int blend_mode)
+{
+    if ((blend_mode >= 1 && blend_mode <= 4) || blend_mode == 19)
+        return float3(1.0, 1.0, 1.0);
+    if (blend_mode >= 9 && blend_mode <= 15)
+        return float3(0.5, 0.5, 0.5);
+    if ((blend_mode >= 5 && blend_mode <= 8) ||
+        (blend_mode >= 16 && blend_mode <= 18))
+        return float3(0.0, 0.0, 0.0);
+    return surface_display;
+}
+
+struct GBRimSurface {
+    float3 linear_rgb;
+    float subject_fraction;
+};
+
+GBRimSurface GBApplyRimSurface(float3 subject_linear, float subject_fraction, float2 uv)
+{
+    GBRimSurface surface;
+    surface.linear_rgb = subject_linear;
+    surface.subject_fraction = subject_fraction;
+    if (subject_fraction <= 0.0)
+        return surface;
+    float contrast_value = clamp(gb_rim_contrast, -1.0, 1.0);
+#ifdef _D3D11
+    [branch]
+#endif
+    if (contrast_value != 0.0) {
+        // Linear-light shadow floor, midtones and highlight headroom.
+
+        const float shadow_floor = 0.02;
+        const float white_target = 0.16;
+        float3 levels = max(subject_linear - shadow_floor, 0.0) *
+                        (sqrt(white_target) / (1.0 - shadow_floor));
+        float3 dark_bed = levels * levels;
+        // Preserve a little shadow detail along partial-coverage edges.
+        // Solid subject keeps the shadow floor unchanged.
+        const float edge_shadow_detail = 0.10;
+        float shadow_detail = edge_shadow_detail * (1.0 - saturate(subject_fraction));
+        dark_bed = lerp(dark_bed, white_target * subject_linear, shadow_detail);
+        // Light reception approaches full strength at two-thirds coverage.
+        // Cubic ease-out joins the full-reception plateau with zero first
+        // and second derivatives, keeping a gradual feathered transition.
+        const float light_coverage_limit = 2.0 / 3.0;
+        float unlit_fraction = 1.0 - saturate(subject_fraction / light_coverage_limit);
+        float light_support = 1.0 - unlit_fraction * unlit_fraction * unlit_fraction;
+        // Start shadow treatment promptly on partial coverage, then ease
+        // smoothly into full treatment. This preserves dim channels under
+        // strong light without leaving a bright residual on thin strands.
+        float uncovered_fraction = 1.0 - saturate(subject_fraction);
+        float uncovered_squared = uncovered_fraction * uncovered_fraction;
+        float material_response = 1.0 - uncovered_squared * uncovered_squared;
+        float treatment = contrast_value * material_response;
+        surface.linear_rgb = max(lerp(subject_linear, dark_bed, treatment), 0.0);
+        // Surface/rim participation changes, final output alpha stays untouched.
+        surface.subject_fraction = saturate(lerp(subject_fraction, light_support, contrast_value));
+    }
+    float2 direction = gb_rim_axis_single;
+    float visibility;
+    if (gb_rim_style == 1 || gb_rim_style == 3) {
+        float2 left = gb_rim_axis_left;
+        float2 right = gb_rim_axis_right;
+        visibility = saturate(GBDirectionalRimVisibility(uv, left) + GBDirectionalRimVisibility(uv, right));
+    } else {
+        visibility = GBDirectionalRimVisibility(uv, direction);
+    }
+#ifdef _D3D11
+    [branch]
+#endif
+    if (visibility <= 0.0)
+        return surface;
+    float3 surface_display = GBEncodeBlend(surface.linear_rgb);
+    bool soft_rim = gb_rim_style < 2;
+    float blend_visibility = soft_rim ? 1.0 : visibility;
+    float3 neutral_display = GBRimNeutral(surface_display, gb_rim_blend_mode);
+    float3 illumination_linear = GBDecode(saturate(gb_rim_color)) *
+                                 (1.0 + clamp(gb_rim_brightness, 0.0, 10.0));
+    illumination_linear *= blend_visibility;
+    if (gb_rim_blend_mode >= 9 && gb_rim_blend_mode <= 15)
+        illumination_linear += GBDecodeBlend(neutral_display);
+    else if ((gb_rim_blend_mode >= 1 && gb_rim_blend_mode <= 4) || gb_rim_blend_mode == 19)
+        illumination_linear += 1.0 - blend_visibility;
+    else if (gb_rim_blend_mode >= 20 && gb_rim_blend_mode <= 22)
+        illumination_linear += surface.linear_rgb;
+    else if (gb_rim_blend_mode == 0 || gb_rim_blend_mode == 23)
+        illumination_linear += surface.linear_rgb * (1.0 - blend_visibility);
+    float3 blend_display = GBBlend(surface_display, GBEncodeBlend(illumination_linear), gb_rim_blend_mode);
+    float3 lit_surface = GBDecodeBlend(blend_display);
+    // A lightening rim must not introduce a dark fringe through transfer rounding.
+    if (gb_rim_blend_mode >= 5 && gb_rim_blend_mode <= 8)
+        lit_surface = max(surface.linear_rgb, lit_surface);
+    if (soft_rim)
+        lit_surface = lerp(surface.linear_rgb, lit_surface, visibility);
+    surface.linear_rgb = lerp(surface.linear_rgb, lit_surface,
+                             surface.subject_fraction * saturate(gb_rim_opacity) * min(1.15, sqrt(FollowBrightnessGain(true))));
+    float3 reactive = GBReactiveRimLight(surface.linear_rgb, subject_linear, blend_visibility,
+                                        gb_rim_opacity, surface.subject_fraction, uv);
+    surface.linear_rgb = soft_rim ? lerp(surface.linear_rgb, reactive, visibility) : reactive;
+    return surface;
+}
+

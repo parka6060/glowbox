@@ -1,0 +1,236 @@
+// Source-driven illumination: protected multiplication plus restrained colored fill.
+uniform texture2d reactive_previous;
+uniform texture2d reactive_signal;
+uniform texture2d reactive_mask;
+uniform bool reactive_valid;
+uniform bool reactive_has_history;
+uniform float reactive_elapsed;
+uniform float reactive_response_scale;
+float ReactiveResponse(float response_time) {
+    if (reactive_response_scale <= 0) return 1;
+    return 1 - exp(-reactive_elapsed / (response_time * reactive_response_scale));
+}
+uniform float reactive_strength;
+uniform bool reactive_background;
+
+// Integrate four positions per cell for bounded lighting, or one centre sample
+// when bounded analysis is disabled.
+uniform bool bounded_analysis = false;
+float4 ReactiveAnalysisSample(float2 uv, float2 extent) {
+    if (!bounded_analysis) {
+        float4 p=image.SampleLevel(linear_sampler,uv,0);
+        return float4(ToLinear(saturate(p.rgb/max(p.a,.00001))),p.a);
+    }
+    float3 sum=0;float alpha=0;
+    for(int j=0;j<2;++j)for(int i=0;i<2;++i) {
+        float2 offset=float2(i-.5,j-.5)*extent*float2(1.0/24,1.0/16);
+        float4 p=image.SampleLevel(linear_sampler,uv+offset,0);
+        sum+=ToLinear(saturate(p.rgb/max(p.a,.00001)))*p.a;alpha+=p.a;
+    }
+    return float4(sum/max(alpha,.00001),alpha*.25);
+}
+
+// Continuous chromaticity weighting. Neutral highlights retain a vote but do not
+// erase broad low-light colour, the shoulder rejects vanishing near-black RGB.
+float LowLightColourWeight(float3 c) {
+    float peak=max(c.r,max(c.g,c.b));
+    float chroma_fraction=(peak-min(c.r,min(c.g,c.b)))/max(peak,.00001);
+    return peak/(peak+.01)*(.2+.8*chroma_fraction);
+}
+float4 LowLightField(float4 ambient,float3 chromaticity) {
+    float peak=max(ambient.r,max(ambient.g,ambient.b));
+    float energy=sqrt(saturate(.65*dot(ambient.rgb,float3(.2126,.7152,.0722))+.35*peak));
+    energy*=peak/(peak+.01);
+    float presence=1.2*energy/(energy+.2)*ambient.a;
+    float top=max(chromaticity.r,max(chromaticity.g,chromaticity.b));
+    return float4(chromaticity/max(top,.00001)*presence,presence);
+}
+
+float4 ReactiveAnalysis(Vertex v) : TARGET {
+    float3 chromatic=0;float chromaticWeight=0;
+    float3 sum = 0, highlights = 0;
+    float coverage = 0, energy = 0;
+    if (reactive_valid) {
+        for (int y = 0; y < 8; ++y) for (int x = 0; x < 12; ++x) {
+            float4 pixel = ReactiveAnalysisSample(float2((x + .5) / 12, (y + .5) / 8),float2(1,1));
+            float3 color = pixel.rgb;
+            float luma = dot(color, float3(.2126, .7152, .0722));
+            float highlight_value = max(luma, .5 * max(color.r, max(color.g, color.b)));
+            float weight = pixel.a * (bounded_analysis ? highlight_value * highlight_value : max(highlight_value - .3, 0) * highlight_value);
+            sum += color * pixel.a;
+            coverage += pixel.a;
+            highlights += color * weight;
+            energy += weight;
+            if(bounded_analysis){
+                float w=pixel.a*LowLightColourWeight(color);
+                chromatic+=color/max(max(color.r,max(color.g,color.b)),.00001)*w;
+                chromaticWeight+=w;
+            }
+        }
+    }
+    float4 ambient = float4(sum / max(coverage, .00001), coverage / 96);
+    float4 bright = float4(highlights / max(energy, .00001), saturate(3 * energy / 96));
+    if(bounded_analysis)bright=LowLightField(ambient,chromatic/max(chromaticWeight,.00001));
+    float4 current = v.uv.x < .5 ? ambient : bright;
+    float4 previous = reactive_has_history ? reactive_previous.Sample(linear_sampler, v.uv) : float4(0,0,0,0);
+    float before = v.uv.x < .5 ? dot(previous.rgb, float3(.2126,.7152,.0722)) : previous.a;
+    float after = v.uv.x < .5 ? dot(current.rgb, float3(.2126,.7152,.0722)) : current.a;
+    // Color changes should not inherit a slow brightness-fade response.
+    float response_time = !reactive_valid ? .12
+        : (v.uv.x < .5 ? .020 : (after > before ? .010 : .060));
+    float response = ReactiveResponse(response_time);
+    if (!reactive_has_history) return current;
+    if (bounded_analysis && v.uv.x>=.5) return SmoothReactiveColor(previous,current,response);
+    return lerp(previous,current,response);
+}
+uniform bool reactive_source_overrides;
+uniform texture2d reactive_override_mask;
+float ReactiveCoverage(float2 uv) {
+    if (reactive_source_overrides) {
+        float4 weights = reactive_override_mask.Sample(linear_sampler, uv);
+        return saturate(weights.b / max(weights.a - weights.r, .00001));
+    }
+    float4 mask = reactive_mask.Sample(linear_sampler, uv);
+    // Exclusion input contains only unprotected color, final composition restores
+    // protected sources. Empty canvas must not receive generated shadow fill.
+    if (reactive_background) return mask.a > .00001 ? 1 : 0;
+    return saturate(mask.r / max(mask.a, .00001));
+}
+
+
+// Source chromaticity and energy are separate, this is an artistic light signal.
+float4 ReactiveLightFrom(float4 ambient,float4 bright) {
+    float ambient_peak = max(ambient.r, max(ambient.g, ambient.b));
+    float bright_peak = max(bright.r, max(bright.g, bright.b));
+    float3 ambient_color = ambient.rgb / max(ambient_peak, .00001);
+    float3 bright_color = bright.rgb / max(bright_peak, .00001);
+    float ambient_level = sqrt(saturate(.65 * dot(ambient.rgb, float3(.2126,.7152,.0722))
+                                       + .35 * ambient_peak));
+    // Keep brief broad flashes, without amplifying a tiny bright area by its square root.
+    float event_level = .50 * saturate(bright.a);
+    float light_level = ambient_level + event_level;
+    float3 light_color = (ambient_color * ambient_level + bright_color * event_level)
+                         / max(light_level, .00001);
+    return float4(light_color, light_level * ambient.a);
+}
+// The tiny field carries colored irradiance (RGB) and energy (A), not a projected image.
+uniform texture2d reactive_spatial;
+uniform texture2d reactive_spatial_previous;
+uniform bool reactive_has_spatial_history;
+uniform float reactive_spatial_amount;
+uniform float2 reactive_origin;
+uniform float2 reactive_axis_x;
+uniform float2 reactive_axis_y;
+uniform float4 reactive_crop;
+uniform float reactive_depth;
+uniform float reactive_aspect;
+float4 ReactiveLightAt(float2 uv) {
+    // Fully spatial light does not consume the global signal. Keep the mixed
+    // path below for fractional participation during Move transitions.
+    if (reactive_spatial_amount == 1) {
+        float4 local = reactive_spatial.Sample(linear_sampler, uv);
+        return float4(local.rgb / max(local.a, .00001), local.a);
+    }
+    float4 light=ReactiveLightFrom(reactive_signal.Sample(linear_sampler,float2(.25,.5)),
+                                 reactive_signal.Sample(linear_sampler,float2(.75,.5)));
+    if(reactive_spatial_amount>0) {
+        float4 local=reactive_spatial.Sample(linear_sampler,uv);
+        float4 mixed=lerp(float4(light.rgb*light.a,light.a),local,reactive_spatial_amount);
+        light=float4(mixed.rgb/max(mixed.a,.00001),mixed.a);
+    }
+    return light;
+}
+float4 ReactiveSpatialAnalysis(Vertex v) : TARGET {
+    float3 chromatic=0;float chromaticWeight=0;
+    float3 sum=0,highlights=0;float coverage=0,energy=0,total=0;
+    float2 receiver=v.uv*float2(reactive_aspect,1);
+    for(int y=0;y<8;++y)for(int x=0;x<12;++x) {
+        float2 q=float2((x+.5)/12,(y+.5)/8);
+        float2 delta=reactive_origin+reactive_axis_x*q.x+reactive_axis_y*q.y-receiver;
+        float distance_squared=dot(delta,delta)+reactive_depth*reactive_depth;
+        float spatial_weight=rsqrt(distance_squared)/distance_squared;
+        float4 pixel=ReactiveAnalysisSample(reactive_crop.xy+q*reactive_crop.zw,reactive_crop.zw);
+        float3 color=pixel.rgb;
+        float luma=dot(color,float3(.2126,.7152,.0722));
+        float peak=max(luma,.5*max(color.r,max(color.g,color.b)));
+        float weight=pixel.a*(bounded_analysis?peak*peak:max(peak-.3,0)*peak)*spatial_weight;
+        sum+=color*pixel.a*spatial_weight;coverage+=pixel.a*spatial_weight;
+        highlights+=color*weight;energy+=weight;total+=spatial_weight;
+        if(bounded_analysis){
+            float w=pixel.a*spatial_weight*LowLightColourWeight(color);
+            chromatic+=color/max(max(color.r,max(color.g,color.b)),.00001)*w;
+            chromaticWeight+=w;
+        }
+    }
+    float4 light=ReactiveLightFrom(float4(sum/max(coverage,.00001),coverage/max(total,.00001)),
+                                 float4(highlights/max(energy,.00001),saturate(3*energy/max(total,.00001))));
+    if(bounded_analysis){
+        float4 ambient=float4(sum/max(coverage,.00001),coverage/max(total,.00001));
+        float4 field=LowLightField(ambient,chromatic/max(chromaticWeight,.00001));
+        light=float4(field.rgb/max(field.a,.00001),field.a);
+    }
+    float4 current=float4(light.rgb*light.a,light.a);
+    float4 previous=reactive_spatial_previous.SampleLevel(linear_sampler,v.uv,0);
+    // Small fluctuations settle gently, large changes keep a fast flash response.
+    float change = length(current.rgb - previous.rgb) / max(length(previous.rgb), .15);
+    float response_time = lerp(.035, .012, smoothstep(.12, .65, change));
+    if (!reactive_has_spatial_history) return current;
+    float response=ReactiveResponse(response_time);
+    return bounded_analysis ? SmoothReactiveColor(previous,current,response) : lerp(previous,current,response);
+}
+technique ReactiveSpatialAnalysis { pass { vertex_shader=VS(v);pixel_shader=ReactiveSpatialAnalysis(v); } }
+float3 ReactiveSurface(float3 baseline, float4 light, float amount) {
+    if (amount <= 0) return baseline;
+    const float3 luma = float3(.2126,.7152,.0722);
+    float3 material = max(baseline, 0);
+    float shade = dot(material, luma);
+    float chroma = saturate((max(light.r,max(light.g,light.b))
+                           - min(light.r,min(light.g,light.b))) * 2);
+    float3 reflectance = lerp(material, float3(shade,shade,shade), .65 * chroma);
+    float3 colored = material + reflectance * light.rgb * ((.30 + .60 * chroma) * amount);
+    // Color strength changes tint around the existing surface brightness.
+    // Exposure following owns brightening and darkening, including white light.
+    colored *= shade / max(dot(colored, luma), .000001);
+    // Compress only out-of-gamut chroma around the same luminance. Clipping
+    // channels independently would flatten shading or shift the hue.
+    float peak = max(colored.r,max(colored.g,colored.b));
+    float ceiling = max(1.0,max(material.r,max(material.g,material.b)));
+    float fit = saturate((ceiling-shade)/max(peak-shade,.000001));
+    colored = lerp(float3(shade,shade,shade),colored,fit);
+    return baseline + colored - material;
+}
+
+float4 ReactiveTreatment(Vertex v) : TARGET {
+    float4 source = image.Sample(linear_sampler, v.uv);
+    float4 light = ReactiveLightAt(v.uv);
+    float amount = reactive_strength * ReactiveCoverage(v.uv) * light.a;
+    return float4(ReactiveSurface(source.rgb, light, amount), source.a);
+}
+technique ReactiveAnalysis { pass { vertex_shader = VS(v); pixel_shader = ReactiveAnalysis(v); } }
+technique ReactiveTreatment { pass { vertex_shader = VS(v); pixel_shader = ReactiveTreatment(v); } }
+
+uniform texture2d follow_previous;
+uniform bool follow_valid;
+uniform bool follow_has_history;
+uniform float follow_elapsed;
+uniform float follow_sensitivity;
+uniform float follow_darken;
+uniform float follow_brighten;
+float4 FollowBrightnessAnalysis(Vertex v) : TARGET {
+    float total = 0, sum = 0;
+    if (follow_valid) for (int y=0;y<8;++y) for (int x=0;x<12;++x) {
+        float2 uv=float2((x+.5)/12,(y+.5)/8);
+        float4 pixel=image.SampleLevel(linear_sampler,uv,0);
+        float3 color=ToLinear(saturate(pixel.rgb/max(pixel.a,.00001)));
+        float weight=pixel.a*(1-.5*dot(uv-.5,uv-.5));
+        sum+=log2(max(dot(color,float3(.2126,.7152,.0722)),.01))*weight; total+=weight;
+    }
+    float target=total>.00001 ? clamp(.5*follow_sensitivity*(sum/total-log2(.18)),-follow_darken,follow_brighten) : 0;
+    float previous=follow_has_history ? follow_previous.SampleLevel(linear_sampler,float2(.5,.5),0).r : 0;
+    // The shared slider preserves default exposure timing and bypasses history
+    // at zero. A gentler scale keeps the slow end usable for exposure changes.
+    float response=reactive_response_scale<=0 ? 1
+        : 1-exp(-follow_elapsed/((target>previous?.25:.6)*sqrt(reactive_response_scale)));
+    return float4(lerp(previous,target,response),target,total,1);
+}
+technique FollowBrightnessAnalysis { pass { vertex_shader=VS(v); pixel_shader=FollowBrightnessAnalysis(v); } }

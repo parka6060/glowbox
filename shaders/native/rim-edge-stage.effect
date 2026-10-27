@@ -1,0 +1,85 @@
+GBPreparedScene GBPrepareScene(float2 uv)
+{
+    GBPreparedScene prepared = GBPrepareSceneSample(uv, -1.0, true);
+#ifdef _D3D11
+    [branch]
+#endif
+    if (!GBRimActive())
+        return prepared;
+    float coverage = GBCoverage(uv);
+#ifdef _D3D11
+    [branch]
+#endif
+    if (coverage <= 0.001 || coverage >= 0.999)
+        return prepared;
+
+    // Rebuild antialiasing from treated colors on either side of a narrow edge.
+    // Lighting an already mixed edge creates a dark seam beside the inner rim.
+    float2 texel = 1.0 / gb_canvas_size;
+    float2 gradient = float2(
+        GBCoverage(uv + float2(texel.x, 0.0)) - GBCoverage(uv - float2(texel.x, 0.0)),
+        GBCoverage(uv + float2(0.0, texel.y)) - GBCoverage(uv - float2(0.0, texel.y)));
+    float gradient_length = length(gradient);
+#ifdef _D3D11
+    [branch]
+#endif
+    if (gradient_length < 0.1)
+        return prepared;
+    float2 step = texel * gradient / gradient_length;
+    float2 outside_uv = uv - step;
+    float2 inside_uv = uv + step;
+    float outside_coverage = GBCoverage(outside_uv);
+    float inside_coverage = GBCoverage(inside_uv);
+    if (outside_coverage > 0.01) {
+        outside_uv -= step;
+        outside_coverage = GBCoverage(outside_uv);
+    }
+    if (inside_coverage < 0.99) {
+        inside_uv += step;
+        inside_coverage = GBCoverage(inside_uv);
+    }
+    if (inside_coverage >= 0.99) {
+        // Stop at the first solid subject, before the rim fades inward.
+        float near_distance = 0.0;
+        float far_distance = length((inside_uv - uv) / texel);
+        for (int search = 0; search < 5; ++search) {
+            float distance = 0.5 * (near_distance + far_distance);
+            if (GBCoverage(uv + step * distance) < 0.99)
+                near_distance = distance;
+            else
+                far_distance = distance;
+        }
+        inside_uv = uv + step * far_distance;
+        inside_coverage = GBCoverage(inside_uv);
+    }
+    // A continuous coverage range avoids gaps where bilinear samples fall just
+    // short of fully opaque or transparent. Flat translucent surfaces stay intact.
+    float coverage_range = inside_coverage - outside_coverage;
+#ifdef _D3D11
+    [branch]
+#endif
+    if (coverage_range <= 0.25)
+        return prepared;
+    // Only resolve a transition with nearly solid colors on both sides.
+    // Broad feathering and translucent artwork must keep their original treatment.
+    float edge_strength = smoothstep(0.75, 0.95, inside_coverage) *
+                          (1.0 - smoothstep(0.05, 0.25, outside_coverage));
+#ifdef _D3D11
+    [branch]
+#endif
+    if (edge_strength <= 0.0)
+        return prepared;
+    GBPreparedScene outside = GBPrepareSceneSample(outside_uv, outside_coverage <= 0.01 ? 0.0 : -1.0, false);
+    GBPreparedScene inside = GBPrepareSceneSample(inside_uv, inside_coverage >= 0.99 ? 1.0 : -1.0, false);
+    float edge_fraction = saturate((coverage - outside_coverage) / coverage_range);
+    float3 edge_linear = GBDecode(lerp(GBEncode(outside.treated_linear),
+                                      GBEncode(inside.treated_linear), edge_fraction));
+    if (gb_rim_blend_mode >= 5 && gb_rim_blend_mode <= 8)
+        edge_linear = max(prepared.treated_linear, edge_linear);
+    prepared.treated_linear = lerp(prepared.treated_linear, edge_linear,
+                                   edge_strength);
+    return prepared;
+}
+
+
+

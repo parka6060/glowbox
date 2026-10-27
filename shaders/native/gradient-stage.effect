@@ -1,0 +1,75 @@
+
+float GBScreenSurfaceOpacity()
+{
+    if (gb_screen_mode == 0)
+        return 0.0;
+    return saturate(gb_effect_opacity);
+}
+
+// A constrained quintic fitted to the Glowbox surface profile.
+// It directly supplies blend-space greys, avoiding per-pixel tanh and transfers.
+float2 GBSurfaceBlendColors(float canvas_y)
+{
+    float position = saturate(2.0 * canvas_y);
+    float2 constant = float2(0.5727158841, 0.4962697699);
+    float2 linear_term = float2(0.0000000000, -0.1210868236);
+    float2 quadratic = float2(-0.5248148778, 0.0348269311);
+    float2 cubic = float2(0.3609994133, 0.0207058847);
+    float2 quartic = float2(0.0220860022, -0.0048558679);
+    float2 quintic = float2(-0.0243424986, 0.0017477558);
+    return constant + position * (linear_term + position * (quadratic +
+        position * (cubic + position * (quartic + position * quintic))));
+}
+
+float GBSubjectSurfaceCoverage(float2 uv, float scene_alpha, float center_fraction,
+                                  bool grid_aligned)
+{
+    // Plain exposure does not need surface-light smoothing at transformed edges.
+    if (GBScreenSurfaceOpacity() == 0.0 && !GBRimActive() && !GBWashActive()) {
+        float coverage = gb_has_subject ? center_fraction * scene_alpha : scene_alpha;
+        return coverage * coverage;
+    }
+    // The compact quadrature is exact inside one bilinear cell at pixel centres.
+    // Wider footprints and subpixel edge probes use the general convolution.
+    float2 reach = float2(0.0005, 0.0005);
+    float filtered = 0.0;
+    if (grid_aligned && max(gb_canvas_size.x, gb_canvas_size.y) <= 2000.0) {
+        float2 footprint = reach * (2.0 / 3.0);
+        float corners = GBCoverage(uv - footprint) + GBCoverage(uv + footprint);
+        corners += GBCoverage(uv + float2(footprint.x, -footprint.y));
+        corners += GBCoverage(uv + float2(-footprint.x, footprint.y));
+        filtered = 0.28125 * corners - 0.125 * GBCoverage(uv);
+    } else {
+        // A unit-sum neighbourhood kernel, evaluated without a centre contribution.
+        for (int row = -1; row <= 1; ++row)
+            for (int column = -1; column <= 1; ++column)
+                if (row != 0 || column != 0)
+                    filtered += 0.125 * GBCoverage(uv + float2(column, row) * reach);
+    }
+    filtered = saturate(filtered);
+    return filtered * filtered;
+}
+
+float3 GBApplySubjectSurface(float3 subject_linear, float coverage,
+                                float blend_color, float opacity)
+{
+    if (opacity <= 0.0 || coverage <= 0.0)
+        return subject_linear;
+    float3 light = float3(blend_color, blend_color, blend_color);
+    float3 shaded = GBDecodeBlend(GBBlend(GBEncodeBlend(subject_linear), light, 10));
+    return lerp(subject_linear, shaded, coverage * opacity);
+}
+
+float GBSubjectSurfaceUnion(float coverage, float opacity)
+{
+    return coverage + coverage * (1.0 - coverage) * opacity;
+}
+
+float3 GBApplySceneSurface(float3 scene_linear, float blend_color, float opacity)
+{
+    if (opacity <= 0.0)
+        return scene_linear;
+    float3 light = float3(blend_color, blend_color, blend_color);
+    float3 shaded = GBDecodeBlend(GBBlend(GBEncodeBlend(scene_linear), light, 9));
+    return lerp(scene_linear, shaded, opacity);
+}

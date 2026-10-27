@@ -1,0 +1,46 @@
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform texture2d auto_image;
+uniform float auto_blend;
+uniform bool source_screen_enabled;
+uniform texture2d source_screen_mask;
+uniform texture2d follow_signal;
+uniform float follow_amount;
+uniform bool follow_background;
+
+sampler_state linear_sampler {
+    Filter = Linear;
+    AddressU = Clamp;
+    AddressV = Clamp;
+};
+struct Vertex { float4 pos : POSITION; float2 uv : TEXCOORD0; };
+Vertex VS(Vertex v) {
+    v.pos = mul(float4(v.pos.xyz, 1.0), ViewProj);
+    return v;
+}
+float4 Copy(Vertex v) : TARGET {
+    return image.Sample(linear_sampler, v.uv);
+}
+// IEC sRGB transfer functions, evaluated independently for each RGB component.
+float3 ToLinear(float3 color) {
+    return color <= 0.04045 ? color / 12.92
+        : pow((max(color, 0.0) + 0.055) / 1.055, 2.4);
+}
+float3 ToDisplay(float3 color) {
+    return color <= 0.0031308 ? color * 12.92
+        : 1.055 * pow(max(color, 0.0), 1.0 / 2.4) - 0.055;
+}
+float FollowBrightnessGain(bool subject) {
+    if (bounded_pipeline || follow_amount <= 0 || (!subject && !follow_background)) return 1;
+    return exp2(follow_signal.SampleLevel(linear_sampler, float2(.5,.5), 0).r * follow_amount);
+}
+uniform texture2d average_previous;
+uniform float average_response;
+float4 Average(Vertex v) : TARGET {
+    float4 total = image.Sample(linear_sampler, float2(.5,.5));
+    for (int y = 1; y <= 5; ++y)
+        for (int x = 1; x <= 7; ++x)
+            total += image.Sample(linear_sampler, float2(float(x)/8.0, float(y)/6.0));
+    return lerp(average_previous.Sample(linear_sampler, float2(.5,.5)),
+                total / 36.0, average_response);
+}

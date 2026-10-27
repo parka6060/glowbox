@@ -1,0 +1,145 @@
+// W3C's standard nonseparable blend luminance, in the blending color space.
+float GBBlendLuminance(float3 rgb)
+{
+    return dot(rgb, float3(0.3, 0.59, 0.11));
+}
+
+float GBColorMin(float3 rgb)
+{
+    return min(rgb.r, min(rgb.g, rgb.b));
+}
+
+float GBColorMax(float3 rgb)
+{
+    return max(rgb.r, max(rgb.g, rgb.b));
+}
+
+float3 GBClipColor(float3 rgb)
+{
+    float luminance_value = GBBlendLuminance(rgb);
+    float minimum = GBColorMin(rgb);
+    if (minimum < 0.0)
+        rgb = luminance_value + (rgb - luminance_value) * luminance_value /
+              max(luminance_value - minimum, 0.000001);
+    float maximum = GBColorMax(rgb);
+    if (maximum > 1.0)
+        rgb = luminance_value + (rgb - luminance_value) * (1.0 - luminance_value) /
+              max(maximum - luminance_value, 0.000001);
+    return saturate(rgb);
+}
+
+float3 GBSetLuminance(float3 rgb, float desired)
+{
+    return GBClipColor(rgb + desired - GBBlendLuminance(rgb));
+}
+
+float3 GBSetSaturation(float3 rgb, float desired)
+{
+    float minimum = GBColorMin(rgb);
+    float range_value = GBColorMax(rgb) - minimum;
+    if (range_value <= 0.000001)
+        return float3(0.0, 0.0, 0.0);
+    return (rgb - minimum) * desired / range_value;
+}
+
+float GBSoftLightChannel(float base_value, float light_value)
+{
+    if (light_value <= 0.5)
+        return base_value - (1.0 - 2.0 * light_value) * base_value * (1.0 - base_value);
+    float curve_value;
+    if (base_value <= 0.25)
+        curve_value = ((16.0 * base_value - 12.0) * base_value + 4.0) * base_value;
+    else
+        curve_value = sqrt(max(base_value, 0.0));
+    return base_value + (2.0 * light_value - 1.0) * (curve_value - base_value);
+}
+
+float GBBurnChannel(float base_value, float light_value)
+{
+    if (base_value >= 1.0)
+        return 1.0;
+    if (light_value <= 0.0)
+        return 0.0;
+    return 1.0 - min(1.0, (1.0 - base_value) / light_value);
+}
+
+float GBDodgeChannel(float base_value, float light_value)
+{
+    if (base_value <= 0.0)
+        return 0.0;
+    if (light_value >= 1.0)
+        return 1.0;
+    return min(1.0, base_value / (1.0 - light_value));
+}
+
+float GBHardLightChannel(float base_value, float light_value)
+{
+    if (light_value <= 0.5)
+        return 2.0 * base_value * light_value;
+    return 1.0 - 2.0 * (1.0 - base_value) * (1.0 - light_value);
+}
+
+float GBVividLightChannel(float base_value, float light_value)
+{
+    if (light_value <= 0.5)
+        return GBBurnChannel(base_value, 2.0 * light_value);
+    return GBDodgeChannel(base_value, 2.0 * light_value - 1.0);
+}
+
+// Modes 0..19 are separable. Hue/Saturation/Color/Luminosity use shared helpers.
+float GBBlendChannel(float base_value, float light_value, int blend_mode)
+{
+    if (blend_mode == 1) return min(base_value, light_value);
+    if (blend_mode == 2) return base_value * light_value;
+    if (blend_mode == 3) return GBBurnChannel(base_value, light_value);
+    if (blend_mode == 4) return max(0.0, base_value + light_value - 1.0);
+    if (blend_mode == 5) return min(1.0, base_value + light_value);
+    if (blend_mode == 6) return max(base_value, light_value);
+    if (blend_mode == 7) return 1.0 - (1.0 - base_value) * (1.0 - light_value);
+    if (blend_mode == 8) return GBDodgeChannel(base_value, light_value);
+    if (blend_mode == 9) return GBHardLightChannel(light_value, base_value);
+    if (blend_mode == 10) return GBSoftLightChannel(base_value, light_value);
+    if (blend_mode == 11) return GBHardLightChannel(base_value, light_value);
+    if (blend_mode == 12) return GBVividLightChannel(base_value, light_value);
+    if (blend_mode == 13) return saturate(base_value + 2.0 * light_value - 1.0);
+    if (blend_mode == 14) {
+        if (light_value <= 0.5) return min(base_value, 2.0 * light_value);
+        return max(base_value, 2.0 * light_value - 1.0);
+    }
+    if (blend_mode == 15) {
+        if (GBVividLightChannel(base_value, light_value) < 0.5) return 0.0;
+        return 1.0;
+    }
+    if (blend_mode == 16) return abs(base_value - light_value);
+    if (blend_mode == 17) return base_value + light_value - 2.0 * base_value * light_value;
+    if (blend_mode == 18) return max(0.0, base_value - light_value);
+    if (blend_mode == 19) {
+        if (light_value <= 0.0) {
+            if (base_value <= 0.0) return 0.0;
+            return 1.0;
+        }
+        return min(1.0, base_value / light_value);
+    }
+    return light_value;
+}
+
+float3 GBBlend(float3 base_rgb, float3 light_rgb, int blend_mode)
+{
+    float3 base_clamped = max(base_rgb, 0.0);
+    float3 light_clamped = max(light_rgb, 0.0);
+    float base_luminance = GBBlendLuminance(base_clamped);
+    if (blend_mode == 20)
+        return GBSetLuminance(GBSetSaturation(light_clamped,
+               GBColorMax(base_clamped) - GBColorMin(base_clamped)), base_luminance);
+    if (blend_mode == 21)
+        return GBSetLuminance(GBSetSaturation(base_clamped,
+               GBColorMax(light_clamped) - GBColorMin(light_clamped)), base_luminance);
+    if (blend_mode == 22)
+        return GBSetLuminance(light_clamped, base_luminance);
+    if (blend_mode == 23)
+        return GBSetLuminance(base_clamped, GBBlendLuminance(light_clamped));
+    return float3(GBBlendChannel(base_clamped.r, light_clamped.r, blend_mode),
+                  GBBlendChannel(base_clamped.g, light_clamped.g, blend_mode),
+                  GBBlendChannel(base_clamped.b, light_clamped.b, blend_mode));
+}
+

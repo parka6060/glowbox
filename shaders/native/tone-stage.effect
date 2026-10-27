@@ -1,0 +1,51 @@
+// The host caches slider-dependent coefficients, each pixel only evaluates them.
+// Every denominator is >= 0.5 on [0,1]. Zero control is the identity by construction.
+float3 GBToneCurve(float3 value, float4 correction, float centre_weight)
+{
+
+    float3 delta = ((correction.w * value + correction.z) * value +
+                    correction.y) * value + correction.x;
+    return saturate(value + delta / (1.0 + centre_weight * value * (1.0 - value)));
+}
+
+float GBToneDarken(float value, float amount, float2 response)
+{
+    float gain = 1.0 + lerp(response.x, response.y, value) /
+                             (1.0 + 0.5 * value * (1.0 - value));
+    return saturate((1.0 + amount) * value * max(gain, 0.0));
+}
+
+float3 GBApplyTone(float3 linear_rgb)
+{
+    float3 color = saturate(linear_rgb);
+    bool white_tint = gb_tint.r >= 1.0 && gb_tint.g >= 1.0 && gb_tint.b >= 1.0;
+    if (gb_brightness == 0.0 && gb_contrast == 0.0 && gb_saturation == 0.0 && white_tint)
+        return color;
+    float brightness = clamp(gb_brightness, -1.0, 1.0);
+    if (brightness > 0.0) {
+        color = GBToneCurve(color, gb_tone_brightness_curve, 0.5);
+    } else if (brightness < 0.0) {
+        color = float3(GBToneDarken(color.r, brightness, gb_tone_darken),
+                       GBToneDarken(color.g, brightness, gb_tone_darken),
+                       GBToneDarken(color.b, brightness, gb_tone_darken));
+    }
+
+    float contrast = clamp(gb_contrast, -1.0, 1.0);
+    if (contrast != 0.0) {
+        color = GBToneCurve(color, gb_tone_contrast_curve, contrast > 0.0 ? -1.0 : -2.0);
+    }
+
+    // Standard linear Rec.709 luminance/chroma scaling, neutral saturation is exact.
+    if (gb_saturation != 0.0) {
+        float luminance = dot(color, float3(0.2126, 0.7152, 0.0722));
+        color = saturate(luminance + (color - luminance) * (1.0 + gb_saturation));
+    }
+    if (white_tint)
+        return color;
+    // Bound the attenuation: tint cannot add light or change white-tint identity.
+    float3 attenuation = saturate((gb_tone_tint_low + gb_tone_tint_rise * color) / (1.0 + 0.5 * color));
+    attenuation = float3(gb_tint.r >= 1.0 ? 1.0 : attenuation.r,
+                         gb_tint.g >= 1.0 ? 1.0 : attenuation.g,
+                         gb_tint.b >= 1.0 ? 1.0 : attenuation.b);
+    return color * attenuation;
+}

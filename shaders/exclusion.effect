@@ -1,0 +1,212 @@
+// Composite these captures in the original scene order.
+uniform float protected_value;
+uniform float spill_value;
+uniform float source_receive_amount;
+uniform float3 source_spotlight_weights;
+uniform texture2d protection_color;
+uniform texture2d protection_mask;
+uniform texture2d exclusion_original;
+uniform texture2d spill_image;
+uniform float spill_gain;
+
+float4 SourceLayerAt(float4 sample, float2 source_uv, float2 raster_position) {
+    float4 color = LayerColor(SourceCorrection(sample), source_uv);
+    if (source_reactive_amount > 0 && reactive_strength > 0) {
+        float2 uv = raster_position / source_canvas;
+        float3 linear_rgb = ToLinear(saturate(color.rgb / max(color.a, .00001)));
+        if (bounded_pipeline) {
+            // Selected-effects sources are restored after scene treatment. Apply
+            // their requested light here, with the same response and limits.
+            linear_rgb = BoundedReactiveAt(linear_rgb, uv, source_reactive_amount, source_reactive_amount);
+        } else {
+            float4 light = ReactiveLightAt(uv);
+            linear_rgb *= pow(FollowBrightnessGain(true), source_reactive_amount);
+            linear_rgb =
+                ReactiveSurface(linear_rgb, light, reactive_strength * source_reactive_amount * light.a);
+        }
+        color.rgb = saturate(ToDisplay(linear_rgb)) * color.a;
+    }
+    return color;
+}
+float4 SourceLayer(Vertex v) : TARGET {
+    return SourceLayerAt(image.Sample(linear_sampler, v.uv), v.uv, v.pos.xy);
+}
+technique SourceLayer {
+    pass {
+        vertex_shader = VS(v);
+        pixel_shader = SourceLayer(v);
+    }
+}
+float4 ProtectionColor(Vertex v) : TARGET {
+    float4 source = image.Sample(linear_sampler, v.uv);
+    // Base and protected RGB must use the same source-local colour transform.
+    // Matching only the restored color would corrupt contribution subtraction.
+    if (protected_value > 0 && auto_blend != 0) source = LayerColor(source, v.uv);
+    return float4(source.rgb * protected_value, source.a);
+}
+float4 ProtectionCustomColor(Vertex v) : TARGET {
+    float4 source = image.Sample(linear_sampler, v.uv);
+    if (protected_value > 0) source = SourceLayer(v);
+    return float4(source.rgb * protected_value, source.a);
+}
+technique ProtectionCustomColor { pass { vertex_shader = VS(v); pixel_shader = ProtectionCustomColor(v); } }
+float4 ProtectionMask(Vertex v) : TARGET {
+    float alpha = image.Sample(linear_sampler, v.uv).a;
+    return float4(protected_value * alpha, spill_value * alpha, source_receive_amount * alpha, alpha);
+}
+// R: blocked surface-light coverage. G: unprotected surface coverage.
+// B: unprotected background coverage receiving rays (selected subject is zero).
+// Alpha occludes in the same source order as the scene. This normalizes weights
+// beneath translucent excluded overlays without another protection-mask sample.
+float4 SourceSpotlightMask(Vertex v) : TARGET {
+    float alpha=image.Sample(linear_sampler,v.uv).a;
+    return float4(source_spotlight_weights*alpha,alpha);
+}
+technique SourceSpotlightMask { pass { vertex_shader=VS(v);pixel_shader=SourceSpotlightMask(v); } }
+float4 ExclusionInput(Vertex v) : TARGET {
+    float4 original = image.Sample(linear_sampler, v.uv);
+    float4 mask = protection_mask.Sample(linear_sampler, v.uv);
+    float3 protected_rgb = protection_color.Sample(linear_sampler, v.uv).rgb;
+    float uncovered = max(original.a - mask.r, 0);
+    // Normalize the unprotected contribution before grading, keep scene alpha for output.
+    float3 rgb = uncovered > 0.00001
+        ? max(original.rgb - protected_rgb, 0) * original.a / uncovered : float3(0, 0, 0);
+    return float4(rgb, original.a);
+}
+float4 ExclusionSubjectMask(Vertex v) : TARGET {
+    float4 subject = image.Sample(linear_sampler, v.uv);
+    float4 protection = protection_mask.Sample(linear_sampler, v.uv);
+    float uncovered = saturate(1 - protection.r / max(protection.a, 0.00001));
+    float selected = uncovered > 0.00001 ? min(subject.r / uncovered, subject.a) : 0;
+    // Apply source weights to the same uncovered contribution as scene colors.
+    // A translucent excluded overlay must not dilute the receiver underneath.
+    float2 weights = uncovered > .00001 ? min(subject.gb / uncovered, subject.aa) : float2(0, 0);
+    return float4(selected, weights, subject.a);
+}
+float4 SourceScreenEmission(Vertex v) : TARGET {
+    float4 color = image.Sample(linear_sampler, v.uv);
+    float4 mask = source_screen_mask.Sample(linear_sampler, v.uv);
+    return float4(color.rgb * saturate(1 - mask.g / max(mask.a, .00001)), color.a);
+}
+technique SourceScreenEmission { pass { vertex_shader = VS(v); pixel_shader = SourceScreenEmission(v); } }
+float4 ExclusionEmission(Vertex v) : TARGET {
+    float4 color = image.Sample(linear_sampler, v.uv);
+    float4 mask = protection_mask.Sample(linear_sampler, v.uv);
+    float unprotected = saturate(1 - mask.r / max(mask.a, .00001));
+    // Keep the same straight-RGB/coverage representation as ordinary preparation.
+    // Extraction weights coverage once, before its nonlinear light operations.
+    return float4(color.rgb * unprotected, color.a);
+}
+float4 ExclusionComposite(Vertex v) : TARGET {
+    float4 original = exclusion_original.Sample(linear_sampler, v.uv);
+    float4 mask = protection_mask.Sample(linear_sampler, v.uv);
+    float3 protected_rgb = protection_color.Sample(linear_sampler, v.uv).rgb;
+    float uncovered = saturate(1 - mask.r / max(original.a, 0.00001));
+    float3 result = uncovered > 0.00001
+        ? protected_rgb + image.Sample(linear_sampler, v.uv).rgb * uncovered : original.rgb;
+    if (mask.g > 0.00001 && spill_gain > 0) {
+        float3 protected_display = saturate(protected_rgb / max(mask.r, 0.00001));
+        float3 light = max(spill_image.Sample(linear_sampler, v.uv).rgb * spill_gain, 0);
+        if (max(light.r, max(light.g, light.b)) > 0.000001) {
+            float3 lit_display = saturate(ToDisplay(ToLinear(protected_display) + light));
+            result += max(lit_display - protected_display, 0) * mask.g;
+        }
+    }
+    return float4(clamp(result, 0, original.a), original.a);
+}
+technique ProtectionColor {
+    pass {
+        vertex_shader = VS(v);
+        pixel_shader = ProtectionColor(v);
+    }
+}
+technique ProtectionMask {
+    pass {
+        vertex_shader = VS(v);
+        pixel_shader = ProtectionMask(v);
+    }
+}
+technique ExclusionInput {
+    pass {
+        vertex_shader = VS(v);
+        pixel_shader = ExclusionInput(v);
+    }
+}
+technique ExclusionEmission {
+    pass {
+        vertex_shader = VS(v);
+        pixel_shader = ExclusionEmission(v);
+    }
+}
+technique ExclusionComposite {
+    pass {
+        vertex_shader = VS(v);
+        pixel_shader = ExclusionComposite(v);
+    }
+}
+
+technique ExclusionSubjectMask {
+    pass {
+        vertex_shader = VS(v);
+        pixel_shader = ExclusionSubjectMask(v);
+    }
+}
+
+// Final response is shared by ordinary, excluded and transition rendering.
+// Both stages read premultiplied display RGB and preserve coverage exactly.
+uniform bool final_has_exclusions;
+float4 FinalReactive(Vertex v) : TARGET {
+    float4 color = image.Sample(linear_sampler, v.uv);
+    if (color.a <= .000001)
+        return color;
+    float participation = 1;
+    if (final_has_exclusions) {
+        float protected_alpha = bounded_overrides.SampleLevel(bounded_sampler, v.uv, 0.0).r;
+        participation = saturate(1 - protected_alpha / color.a);
+    }
+    float3 linear_rgb = ToLinear(saturate(color.rgb / color.a));
+    linear_rgb = BoundedReactiveWeighted(linear_rgb, v.uv, participation);
+    return float4(saturate(ToDisplay(linear_rgb)) * color.a, color.a);
+}
+float4 FinalRays(Vertex v) : TARGET {
+    float4 color = image.Sample(linear_sampler, v.uv);
+    if (color.a <= .000001)
+        return color;
+    float3 linear_rgb = ApplyLightRays(ToLinear(saturate(color.rgb / color.a)), v.uv, color.a);
+    return float4(saturate(ToDisplay(linear_rgb)) * color.a, color.a);
+}
+technique FinalReactive {
+    pass {
+        vertex_shader = VS(v);
+        pixel_shader = FinalReactive(v);
+    }
+}
+technique FinalRays {
+    pass {
+        vertex_shader = VS(v);
+        pixel_shader = FinalRays(v);
+    }
+}
+
+float4 ViewportSourceLayer(LayerViewportVertex v) : TARGET {
+    return SourceLayerAt(image.Sample(linear_sampler, v.uv), v.source_uv, v.pos.xy);
+}
+float4 ViewportProtectionColor(LayerViewportVertex v) : TARGET {
+    float4 source = image.Sample(linear_sampler, v.uv);
+    if (protected_value > 0 && auto_blend != 0)
+        source = LayerColor(source, v.source_uv);
+    return float4(source.rgb * protected_value, source.a);
+}
+float4 ViewportProtectionCustomColor(LayerViewportVertex v) : TARGET {
+    float4 source = image.Sample(linear_sampler, v.uv);
+    if (protected_value > 0)
+        source = ViewportSourceLayer(v);
+    return float4(source.rgb * protected_value, source.a);
+}
+float4 ViewportProtectionMask(LayerViewportVertex v) : TARGET { Vertex source;source.pos=v.pos;source.uv=v.uv;return ProtectionMask(source); }
+float4 ViewportSourceSpotlightMask(LayerViewportVertex v) : TARGET { Vertex source;source.pos=v.pos;source.uv=v.uv;return SourceSpotlightMask(source); }
+technique ViewportSourceLayer { pass { vertex_shader=LayerViewportVS(v);pixel_shader=ViewportSourceLayer(v); } }
+technique ViewportProtectionColor { pass { vertex_shader=LayerViewportVS(v);pixel_shader=ViewportProtectionColor(v); } }
+technique ViewportProtectionCustomColor { pass { vertex_shader=LayerViewportVS(v);pixel_shader=ViewportProtectionCustomColor(v); } }
+technique ViewportProtectionMask { pass { vertex_shader=LayerViewportVS(v);pixel_shader=ViewportProtectionMask(v); } }
+technique ViewportSourceSpotlightMask { pass { vertex_shader=LayerViewportVS(v);pixel_shader=ViewportSourceSpotlightMask(v); } }

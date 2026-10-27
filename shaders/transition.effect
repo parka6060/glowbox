@@ -1,0 +1,8 @@
+// Blend complete scene treatments, discrete modes never need interpolation.
+uniform texture2d transition_a;
+uniform texture2d transition_b;
+uniform float transition_mix;
+float4 TransitionBlendPS(Vertex v) : TARGET {
+    return lerp(transition_a.Sample(linear_sampler, v.uv), transition_b.Sample(linear_sampler, v.uv), transition_mix);
+}
+technique TransitionBlend { pass { vertex_shader = VS(v); pixel_shader = TransitionBlendPS(v); } }

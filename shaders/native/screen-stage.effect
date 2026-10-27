@@ -1,0 +1,129 @@
+// Monitor and Glow finishing. Fields contain linear RGB with opaque validity.
+// Output alpha always comes from the original OBS capture.
+
+float GBScreenCutoffLinear(float encoded_cutoff)
+{
+    float nonnegative = max(encoded_cutoff, 0.0);
+    // Cutoffs above display white use a 2.2 power.
+    if (nonnegative > 1.0)
+        return pow(nonnegative, 2.2);
+    return GBDecodeChannel(nonnegative);
+}
+
+float GBScreenThresholdWeight(float3 straight_linear, float linear_cutoff, bool soft_knee)
+{
+    // Colored highlights qualify by their brightest linear channel, not luminance.
+    float peak = GBColorMax(max(straight_linear, 0.0));
+    if (peak <= 0.000001)
+        return 0.0;
+    float excess = max(peak - linear_cutoff, 0.0);
+    if (soft_knee && linear_cutoff > 0.000001) {
+        // Quadratic joins the dark and linear responses continuously at T +/- T/2.
+        float knee_half_width = 0.5 * linear_cutoff + 0.00001;
+        float knee_position = clamp(peak - linear_cutoff + knee_half_width,
+                                    0.0, 2.0 * knee_half_width);
+        float knee_excess = knee_position * knee_position / (4.0 * knee_half_width);
+        excess = max(excess, knee_excess);
+    }
+    return saturate(excess / peak);
+}
+
+float4 GBScreenExtractField(float4 prepared_field, float encoded_cutoff, bool soft_knee)
+{
+    if (prepared_field.a <= 0.000001)
+        return float4(0.0, 0.0, 0.0, prepared_field.a);
+    float3 straight_linear = max(prepared_field.rgb / prepared_field.a, 0.0);
+    float threshold_weight = GBScreenThresholdWeight(straight_linear,
+                              GBScreenCutoffLinear(encoded_cutoff), soft_knee);
+    // Preserve coverage even when RGB fails threshold. Coverage is not light energy.
+    return float4(max(prepared_field.rgb, 0.0) * threshold_weight, prepared_field.a);
+}
+
+float4 GBMonitorExtractPixel(GBVertex vertex_in) : TARGET
+{
+    // Input is an unblurred prepared-scene field at the monitor prefilter dimensions.
+    float4 prepared_field = float4(GBMedianPrefilter(vertex_in.uv), 1.0);
+    float encoded_cutoff = 0.1;
+    if (gb_screen_mode == 2)
+        encoded_cutoff = 0.0;
+    return GBScreenExtractField(prepared_field, encoded_cutoff, false);
+}
+
+float4 GBScreenHighlightExtractPixel(GBVertex vertex_in) : TARGET
+{
+    // Glow light uses its own prefilter/footprint, monitor cutoff is independent.
+    float4 prepared_field = float4(GBMedianPrefilter(vertex_in.uv), 1.0);
+    float encoded_cutoff = 1.37 * clamp(gb_glow_threshold, 0.0, 0.99);
+    return GBScreenExtractField(prepared_field, encoded_cutoff, true);
+}
+
+float3 GBScreenFieldColor(float4 field_value, float energy)
+{
+    if (field_value.a <= 0.000001)
+        return float3(0.0, 0.0, 0.0);
+    // The field already includes its scale weights, apply branch energy once.
+    return saturate(max(field_value.rgb / field_value.a, 0.0) *
+                    max(energy, 0.0));
+}
+
+float3 GBApplyMonitor(float3 prepared_linear, float4 monitor_field)
+{
+    float opacity = saturate(gb_effect_opacity);
+    if (gb_screen_mode < 1 || gb_screen_mode > 3 || opacity <= 0.0 ||
+        monitor_field.a <= 0.000001)
+        return prepared_linear;
+
+    float intensity = saturate(gb_effect_intensity);
+    float field_energy = 0.18;
+    float branch_opacity = 0.3 * opacity;
+    float soft_mix = 0.3 + 0.65 * intensity;
+    int primary_blend_mode = 7; // Display Screen.
+    if (gb_screen_mode == 1) {
+        field_energy = 0.18 + 0.02 * intensity;
+        branch_opacity = (0.2 + 0.2 * intensity) * opacity;
+        soft_mix = 0.7 + 0.25 * intensity;
+    } else if (gb_screen_mode == 2) {
+        field_energy = 1.0;
+        branch_opacity = intensity * opacity;
+        soft_mix = saturate(gb_diffusion_contrast);
+        primary_blend_mode = 6; // Display Lighten, contrast zero cannot darken.
+    }
+
+    float3 light_linear = GBScreenFieldColor(monitor_field, field_energy);
+    // Neighborhood validity attenuates contribution at partially covered scene edges.
+    // It never substitutes for the alpha sampled from the original capture in Finish.
+    float mix_weight = branch_opacity * saturate(monitor_field.a);
+    float3 primary_linear = GBDecodeBlend(GBBlend(GBEncodeBlend(prepared_linear),
+                                            GBEncodeBlend(light_linear), primary_blend_mode));
+    primary_linear = saturate(lerp(prepared_linear, primary_linear, mix_weight));
+    // This branch deliberately reverses the usual surface/light argument order.
+    // It is W3C Soft Light applied directly in linear space, not an encoded blend.
+    float3 contrast_linear = GBBlend(light_linear, prepared_linear, 10);
+    contrast_linear = saturate(lerp(prepared_linear, contrast_linear, mix_weight));
+    float3 monitor_result = lerp(primary_linear, contrast_linear, soft_mix);
+
+    return monitor_result;
+}
+
+float3 GBApplyFinalGlow(float3 finished_base_linear, float4 highlight_field)
+{
+    float opacity = saturate(gb_effect_opacity);
+    if (gb_screen_mode != 3 || opacity <= 0.0 || highlight_field.a <= 0.000001)
+        return finished_base_linear;
+
+    float intensity = saturate(gb_effect_intensity);
+    // Opacity enters light energy here and the final result interpolation below.
+    // Those two documented roles cannot be replaced by one intensity*opacity weight.
+    float light_energy = (0.1 + 0.9 * intensity) * opacity;
+    float3 light_linear = GBScreenFieldColor(highlight_field, light_energy);
+    float light_luminance = GBLinearLuminance(light_linear);
+    light_linear = saturate(lerp(float3(light_luminance, light_luminance, light_luminance),
+                                light_linear, 1.1 + 0.8 * intensity));
+
+    float3 screened_linear = GBDecodeBlend(GBBlend(GBEncodeBlend(finished_base_linear),
+                                             GBEncodeBlend(light_linear), 7));
+    float3 contrast_linear = GBDecodeBlend(GBBlend(GBEncodeBlend(screened_linear),
+                                             GBEncodeBlend(0.3 * light_linear), 10));
+    float3 glow_result = lerp(screened_linear, contrast_linear, 0.3);
+    return lerp(finished_base_linear, glow_result, opacity * saturate(highlight_field.a));
+}

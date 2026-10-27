@@ -1,0 +1,68 @@
+// Final-stage reactive illumination. Bounds apply to displayed linear luminance.
+uniform bool bounded_enabled = false;
+uniform bool bounded_pipeline = false;
+uniform texture2d bounded_spatial;
+uniform texture2d bounded_signal;
+uniform texture2d bounded_follow;
+uniform texture2d bounded_mask;
+uniform texture2d bounded_overrides;
+uniform bool bounded_has_overrides;
+uniform float bounded_spatial_amount;
+uniform float bounded_strength;
+uniform float bounded_follow_amount;
+uniform float bounded_darken;
+uniform float bounded_brighten;
+uniform bool bounded_color_background;
+uniform bool bounded_exposure_background;
+sampler_state bounded_sampler { Filter = Linear; AddressU = Clamp; AddressV = Clamp; };
+float3 BoundedReactiveAt(float3 baseline, float2 uv, float color_receive, float exposure_receive) {
+    const float3 weights=float3(.2126,.7152,.0722);
+    // Anchor to the output the user actually sees, including clipping from manual effects.
+    float3 base=saturate(baseline);
+    float shade=dot(base,weights);
+    if (shade<=.000001) return base;
+    float4 local=bounded_spatial.SampleLevel(bounded_sampler,uv,0.0);
+    float4 global=bounded_signal.SampleLevel(bounded_sampler,float2(.75,.5),0.0);
+    float4 field=lerp(global,local,bounded_spatial_amount);
+    float3 light=field.rgb/max(field.a,.00001);
+    float amount=bounded_strength*field.a*color_receive;
+    // Multiplicative response retains material shading, a small neutral component
+    // lets dark saturated materials receive a different hue without turning grey.
+    float peak=max(light.r,max(light.g,light.b));
+    float chroma_fraction=(peak-min(light.r,min(light.g,light.b)))/max(peak,.00001);
+    float3 lit=base+(base+.20*shade*chroma_fraction)*light*amount;
+    float litY=dot(lit,weights);
+    float3 tint=lit*(shade/max(litY,.000001));
+    float lift=log2(max(litY/shade,1));
+    float follow=bounded_follow.SampleLevel(bounded_sampler,float2(.5,.5),0.0).r;
+    float following=saturate(bounded_follow_amount);
+    // With following off, colour has a restrained quarter-stop lift. With it on,
+    // source metering drives darkness and brightness and owns the complete budget.
+    float wanted=lerp(.25*lift/(1+lift),follow*exposure_receive,following);
+    float dark=bounded_darken*exposure_receive;
+    float bright=bounded_brighten*exposure_receive;
+    float ev=lerp(wanted,clamp(wanted,-dark,bright),following);
+    float targetY=min(shade*exp2(ev),1);
+    float3 result=tint*(targetY/shade);
+    // Fit colour around target luminance instead of clipping channels independently.
+    float top=max(result.r,max(result.g,result.b));
+    float fit=saturate((1-targetY)/max(top-targetY,.000001));
+    return lerp(float3(targetY,targetY,targetY),result,fit);
+}
+
+float3 BoundedReactiveWeighted(float3 baseline, float2 uv, float participation) {
+    if (!bounded_enabled || participation<=.000001) return baseline;
+    float4 mask=bounded_mask.SampleLevel(bounded_sampler,uv,0.0);
+    float fg=saturate(mask.r/max(mask.a,.00001));
+    float color_receive=bounded_color_background?1:fg;
+    float exposure_receive=bounded_exposure_background?1:fg;
+    if (bounded_has_overrides) {
+        float4 custom=bounded_overrides.SampleLevel(bounded_sampler,uv,0.0);
+        color_receive=saturate(custom.b/max(custom.a-custom.r,.00001));
+        exposure_receive=color_receive;
+    }
+    color_receive*=participation;
+    exposure_receive*=participation;
+    return BoundedReactiveAt(baseline,uv,color_receive,exposure_receive);
+}
+
