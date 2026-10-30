@@ -409,9 +409,15 @@ float4 LightRaysCapture(ShadowFieldVertex v) : TARGET {
     float plane=spotlight_plane_scale;
     float mid=(plane+1.0)*.5;
     float aperture=1.0;
-    [branch] if(light_pattern>.5) aperture=LightPattern(v.uv,mid);
-    else if(scene_light_type>.5) aperture=lerp(1.0,DirectionalAperture(v.uv,mid),rays_detail);
-    else aperture=lerp(1.0,RayAperture(v.uv,mid),rays_detail);
+#ifdef _D3D11
+    [branch]
+#endif
+    if (light_pattern > .5)
+        aperture = LightPattern(v.uv, mid);
+    else if (scene_light_type > .5)
+        aperture = lerp(1.0, DirectionalAperture(v.uv, mid), rays_detail);
+    else
+        aperture = lerp(1.0, RayAperture(v.uv, mid), rays_detail);
     float sum=0.0;
     for(int i=0;i<16;++i) {
         float t=lerp(plane,1.0,(i+.5)/16.0);

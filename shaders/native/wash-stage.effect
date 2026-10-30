@@ -32,7 +32,8 @@ float3 GBWashReferenceTint(float2 uv)
     float height=saturate((uv.y-0.169581465628)/(1.107220051643-0.169581465628));
     float depth=height*height*height*(10.0+height*(-15.0+6.0*height));
     float3 tint;
-    if(peak<=0.000001) tint=0.949704194197*(1.0-0.206033322171*depth);
+    if (peak <= 0.000001)
+        tint = white * 0.949704194197 * (1.0 - 0.206033322171 * depth);
     else {
         float3 extinction_axis=1.0-rgb/peak;
         float chroma=max(extinction_axis.r,max(extinction_axis.g,extinction_axis.b));
@@ -94,7 +95,7 @@ float3 GBApplySecondaryWash(float3 linear_rgb, float4 wash_field, float2 uv)
 #ifdef _D3D11
     [branch]
 #endif
-    if(any(radiance>4.0)) {
+    if (max(radiance.r, max(radiance.g, radiance.b)) > 4.0) {
         float3 distance=max((sqrt(min(radiance,64.0))-2.0)/6.0,0.0);
         float3 tail0=(2.279110038516 + material * (-3.441381416453 + material * (4.436397957207 + material * (-3.826750391730 + material * 1.435897761412))));
         float3 tail1=(3.678124799338 + material * (-9.760073655272 + material * (11.042002002722 + material * (-6.828085246198 + material * 1.671260808067))));

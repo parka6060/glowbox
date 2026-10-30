@@ -59,6 +59,8 @@ static void update_color_reference(Compositor *f, obs_data_t *s) {
 }
 
 void update_settings(void *data, obs_data_t *s) {
+    if (!data)
+        return;
     auto *f = (Compositor *)data;
     // Intensity stores a curved slider position, Opacity is a linear fade.
 
@@ -241,6 +243,8 @@ void default_settings(obs_data_t *s) {
     obs_data_set_default_double(s, "flare_opacity", .25);
 }
 void load_compositor_settings(void *data, obs_data_t *settings) {
+    if (!data)
+        return;
     // Older scene files may omit their previous default (Overlay).
     if (!obs_data_has_user_value(settings, "rim_blend")) {
         obs_data_set_int(settings, "rim_blend", 9);
@@ -249,6 +253,8 @@ void load_compositor_settings(void *data, obs_data_t *settings) {
 }
 
 void save_compositor_settings(void *data, obs_data_t *settings) {
+    if (!data)
+        return;
     // Persist the resolved default so new Screen filters reload as Screen.
     obs_data_set_int(settings, "rim_blend", static_cast<Compositor *>(data)->rim_blend);
 }

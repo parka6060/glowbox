@@ -71,7 +71,8 @@ sampler_state gb_linear_clamp {
 };
 
 float GBSourceScreenReceive(float2 uv) {
-    if (!source_screen_enabled) return 1;
+    if (!source_screen_enabled)
+        return 1.0;
     float4 mask = source_screen_mask.SampleLevel(gb_linear_clamp, uv,0.0);
     return saturate(1 - mask.b / max(mask.a, .00001));
 }
@@ -160,7 +161,8 @@ uniform texture2d follow_signal;
 uniform float follow_amount;
 uniform bool follow_background;
 float FollowBrightnessGain(bool subject) {
-    if (bounded_pipeline || follow_amount <= 0 || (!subject && !follow_background)) return 1;
+    if (bounded_pipeline || follow_amount <= 0 || (!subject && !follow_background))
+        return 1.0;
     return exp2(follow_signal.SampleLevel(gb_linear_clamp, float2(.5,.5), 0).r * follow_amount);
 }
 float GBCoverage(float2 uv)

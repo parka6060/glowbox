@@ -22,16 +22,27 @@ float4 Copy(Vertex v) : TARGET {
     return image.Sample(linear_sampler, v.uv);
 }
 // IEC sRGB transfer functions, evaluated independently for each RGB component.
-float3 ToLinear(float3 color) {
+float ToLinearChannel(float color) {
     return color <= 0.04045 ? color / 12.92
         : pow((max(color, 0.0) + 0.055) / 1.055, 2.4);
 }
-float3 ToDisplay(float3 color) {
+float ToDisplayChannel(float color) {
     return color <= 0.0031308 ? color * 12.92
         : 1.055 * pow(max(color, 0.0), 1.0 / 2.4) - 0.055;
 }
+float3 ToLinear(float3 color) {
+    return float3(ToLinearChannel(color.r),
+                  ToLinearChannel(color.g),
+                  ToLinearChannel(color.b));
+}
+float3 ToDisplay(float3 color) {
+    return float3(ToDisplayChannel(color.r),
+                  ToDisplayChannel(color.g),
+                  ToDisplayChannel(color.b));
+}
 float FollowBrightnessGain(bool subject) {
-    if (bounded_pipeline || follow_amount <= 0 || (!subject && !follow_background)) return 1;
+    if (bounded_pipeline || follow_amount <= 0 || (!subject && !follow_background))
+        return 1.0;
     return exp2(follow_signal.SampleLevel(linear_sampler, float2(.5,.5), 0).r * follow_amount);
 }
 uniform texture2d average_previous;

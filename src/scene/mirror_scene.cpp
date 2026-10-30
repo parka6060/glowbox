@@ -71,7 +71,9 @@ std::string subject_setting_key(obs_sceneitem_t *item) {
 // Studio Mode copies item private settings, but renumbers scene-item IDs.
 // Keep selection identity on the item and migrate the old numeric keys once.
 void prepare_subject_settings(Compositor *f, obs_scene_t *scene) {
-    if (!scene || !f->layer_settings) return;
+    // OBS can retain a failed source handle without a compositor instance.
+    if (!f || !scene || !f->layer_settings)
+        return;
     struct Context { Compositor *filter; obs_data_t *settings; } context{f, obs_source_get_settings(f->source)};
     obs_scene_enum_items(scene, [](obs_scene_t *owner, obs_sceneitem_t *item, void *opaque) {
         auto &context = *static_cast<Context *>(opaque);

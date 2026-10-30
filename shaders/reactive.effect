@@ -7,7 +7,8 @@ uniform bool reactive_has_history;
 uniform float reactive_elapsed;
 uniform float reactive_response_scale;
 float ReactiveResponse(float response_time) {
-    if (reactive_response_scale <= 0) return 1;
+    if (reactive_response_scale <= 0)
+        return 1.0;
     return 1 - exp(-reactive_elapsed / (response_time * reactive_response_scale));
 }
 uniform float reactive_strength;
@@ -21,7 +22,8 @@ float4 ReactiveAnalysisSample(float2 uv, float2 extent) {
         float4 p=image.SampleLevel(linear_sampler,uv,0);
         return float4(ToLinear(saturate(p.rgb/max(p.a,.00001))),p.a);
     }
-    float3 sum=0;float alpha=0;
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float alpha = 0;
     for(int j=0;j<2;++j)for(int i=0;i<2;++i) {
         float2 offset=float2(i-.5,j-.5)*extent*float2(1.0/24,1.0/16);
         float4 p=image.SampleLevel(linear_sampler,uv+offset,0);
@@ -47,9 +49,12 @@ float4 LowLightField(float4 ambient,float3 chromaticity) {
 }
 
 float4 ReactiveAnalysis(Vertex v) : TARGET {
-    float3 chromatic=0;float chromaticWeight=0;
-    float3 sum = 0, highlights = 0;
-    float coverage = 0, energy = 0;
+    float3 chromatic = float3(0.0, 0.0, 0.0);
+    float chromaticWeight = 0;
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float3 highlights = float3(0.0, 0.0, 0.0);
+    float coverage = 0;
+    float energy = 0;
     if (reactive_valid) {
         for (int y = 0; y < 8; ++y) for (int x = 0; x < 12; ++x) {
             float4 pixel = ReactiveAnalysisSample(float2((x + .5) / 12, (y + .5) / 8),float2(1,1));
@@ -93,7 +98,8 @@ float ReactiveCoverage(float2 uv) {
     float4 mask = reactive_mask.Sample(linear_sampler, uv);
     // Exclusion input contains only unprotected color, final composition restores
     // protected sources. Empty canvas must not receive generated shadow fill.
-    if (reactive_background) return mask.a > .00001 ? 1 : 0;
+    if (reactive_background)
+        return mask.a > .00001 ? 1.0 : 0.0;
     return saturate(mask.r / max(mask.a, .00001));
 }
 
@@ -141,8 +147,13 @@ float4 ReactiveLightAt(float2 uv) {
     return light;
 }
 float4 ReactiveSpatialAnalysis(Vertex v) : TARGET {
-    float3 chromatic=0;float chromaticWeight=0;
-    float3 sum=0,highlights=0;float coverage=0,energy=0,total=0;
+    float3 chromatic = float3(0.0, 0.0, 0.0);
+    float chromaticWeight = 0;
+    float3 sum = float3(0.0, 0.0, 0.0);
+    float3 highlights = float3(0.0, 0.0, 0.0);
+    float coverage = 0;
+    float energy = 0;
+    float total = 0;
     float2 receiver=v.uv*float2(reactive_aspect,1);
     for(int y=0;y<8;++y)for(int x=0;x<12;++x) {
         float2 q=float2((x+.5)/12,(y+.5)/8);

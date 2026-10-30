@@ -46,7 +46,7 @@ void prepare_compositor_graphics(Compositor *compositor, gs_effect_t *borrowed_e
     }
     if (compositor->support_pending && shader_preparation_state() == ShaderPreparation::Ready)
         ensure_support_effect(compositor);
-    blog(LOG_INFO, "[Glowbox] compositor shader prepared in %.1f ms",
+    blog(LOG_INFO, "[Glowbox] compositor shader preparation attempt took %.1f ms",
          (os_gettime_ns() - preparation_started_ns) / 1000000.0);
     if (shader_error) {
         blog(LOG_ERROR, "[Glowbox] %s", shader_error);

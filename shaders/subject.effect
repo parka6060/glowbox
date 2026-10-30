@@ -18,7 +18,8 @@ float3 AutoTint(float2 uv) {
     return lerp(upper,lower,.2*smoothstep(.25,1.0,uv.y));
 }
 float4 SourceCorrection(float4 color) {
-    if (source_exposure != 1 || source_saturation != 1 || any(source_tint.rgb != float3(1,1,1))) {
+    if (source_exposure != 1 || source_saturation != 1 ||
+        source_tint.r != 1.0 || source_tint.g != 1.0 || source_tint.b != 1.0) {
         float3 linear_rgb = ToLinear(saturate(color.rgb / max(color.a, .00001)));
         float luma = dot(linear_rgb, float3(.2126,.7152,.0722));
         linear_rgb = max(lerp(float3(luma,luma,luma), linear_rgb, source_saturation), 0);
