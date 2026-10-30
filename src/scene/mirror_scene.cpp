@@ -100,6 +100,19 @@ static bool collect_item(obs_scene_t *, obs_sceneitem_t *item, void *data) {
     ((std::vector<obs_sceneitem_t *> *)data)->push_back(item);
     return true;
 }
+static obs_source_t *active_item_transition(obs_sceneitem_t *item) {
+    auto *transition = obs_sceneitem_get_transition(item, obs_sceneitem_visible(item));
+    if (!transition)
+        return nullptr;
+    // Show/Hide runs between a source and transparency.
+    // Once playback stops, the active source is input A.
+    auto *from = obs_transition_get_source(transition, OBS_TRANSITION_SOURCE_A);
+    auto *destination = obs_transition_get_active_source(transition);
+    const bool playing = from != destination;
+    obs_source_release(from);
+    obs_source_release(destination);
+    return playing ? obs_source_get_ref(transition) : nullptr;
+}
 bool sync_mirror(Compositor *f, obs_scene_t *scene) {
     if (!scene)
         return false;
@@ -131,17 +144,10 @@ bool sync_mirror(Compositor *f, obs_scene_t *scene) {
                                     (f->has_exclusions || f->has_reactive_overrides) != (f->protection_mask_mirror != nullptr) ||
                                     f->has_spotlight_overrides != (f->lighting_mask_mirror != nullptr);
     for (size_t i = 0; i < live.size(); ++i) {
-        // Transition state is private to libobs. Fall back rather than silently
-        // replacing animated visibility with a hard cut.
         // Protected contributions use normal premultiplied over-compositing.
         if ((f->has_exclusions || f->has_reactive_overrides || f->has_spotlight_overrides) && obs_sceneitem_visible(live[i]) &&
             obs_sceneitem_get_blending_mode(live[i]) != OBS_BLEND_NORMAL)
             supported = false;
-        for (bool show : {false, true}) {
-            auto *transition = obs_sceneitem_get_transition(live[i], show);
-            if (transition)
-                supported = false;
-        }
         if (!rebuild && (f->items[i].id != obs_sceneitem_get_id(live[i]) ||
                          f->items[i].view->original != obs_sceneitem_get_source(live[i])))
             rebuild = true;
@@ -219,6 +225,17 @@ bool sync_mirror(Compositor *f, obs_scene_t *scene) {
     if (supported)
         for (size_t i = 0; i < live.size(); ++i) {
             auto &entry = f->items[i];
+            auto *transition = f->scene_capture_callback ? nullptr : active_item_transition(live[i]);
+            obs_source_release(entry.view->transition);
+            entry.view->transition = transition;
+            const bool visible = obs_sceneitem_visible(live[i]) || transition;
+            if (transition) {
+                obs_transition_set_size(transition, obs_source_get_width(entry.view->original),
+                                        obs_source_get_height(entry.view->original));
+                if ((f->has_exclusions || f->has_reactive_overrides || f->has_spotlight_overrides) &&
+                    obs_sceneitem_get_blending_mode(live[i]) != OBS_BLEND_NORMAL)
+                    supported = false;
+            }
             obs_transform_info transform = {};
             obs_sceneitem_get_info2(live[i], &transform);
             obs_sceneitem_crop crop = {};
@@ -259,7 +276,7 @@ bool sync_mirror(Compositor *f, obs_scene_t *scene) {
                     obs_sceneitem_set_blending_method(copy, method);
                 if (mode != obs_sceneitem_get_blending_mode(copy))
                     obs_sceneitem_set_blending_mode(copy, mode);
-                obs_sceneitem_set_visible(copy, obs_sceneitem_visible(live[i]) &&
+                obs_sceneitem_set_visible(copy, visible &&
                                                     !((subject || entry.view->protection != SourceProtection::None) && copy == entry.background_item));
             }
             if (obs_sceneitem_is_group(live[i])) {

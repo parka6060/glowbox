@@ -23,11 +23,14 @@ static void layer_destroy(void *data) {
     obs_enter_graphics();
     gs_texrender_destroy(v->capture);
     obs_leave_graphics();
+    obs_source_release(v->transition);
     obs_source_release(v->original);
     delete v;
 }
 static obs_source_t *layer_input(LayerView *view) {
-    return view->capture_input ? view->capture_input : view->original;
+    if (view->capture_input)
+        return view->capture_input;
+    return view->transition ? view->transition : view->original;
 }
 static uint32_t layer_width(void *data) {
     return obs_source_get_width(layer_input(static_cast<LayerView *>(data)));

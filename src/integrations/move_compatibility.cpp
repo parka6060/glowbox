@@ -829,9 +829,6 @@ bool collect(obs_scene_t *, obs_sceneitem_t *item, void *data) {
             c->override_child_transition = c->override_child_transition || nested.override_child_transition;
         }
     }
-    for (bool show : {false, true})
-        if (obs_sceneitem_get_transition(item, show))
-            c->valid = false;
     if (obs_sceneitem_get_blending_mode(item) != OBS_BLEND_NORMAL)
         c->valid = false;
     for (auto &entry : *c->items)
@@ -1043,7 +1040,7 @@ bool prepare(Bridge *b, obs_source_t *a, obs_source_t *z) {
                                "roles; using ordinary Move rendering");
             b->warned = true;
         } else
-            blog(LOG_WARNING, "[Glowbox] Move: unsupported item transition/blending or conflicting subject "
+            blog(LOG_WARNING, "[Glowbox] Move: unsupported blending or conflicting subject "
                               "roles for repeated source");
         for (auto *config : configs)
             obs_data_release(config);

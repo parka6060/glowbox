@@ -2,11 +2,6 @@
 #include "properties_ui.hpp"
 
 namespace glowbox {
-static bool has_item_transition(obs_scene_t *, obs_sceneitem_t *item, void *data) {
-    if (obs_sceneitem_get_transition(item, false) || obs_sceneitem_get_transition(item, true))
-        *static_cast<bool *>(data) = true;
-    return true;
-}
 static const char *subject_unavailable(obs_source_t *filter) {
     auto *parent = filter ? obs_filter_get_parent(filter) : nullptr;
     auto *scene = parent ? obs_scene_from_source(parent) : nullptr;
@@ -14,10 +9,6 @@ static const char *subject_unavailable(obs_source_t *filter) {
         return "Add Glowbox to a scene to choose Subject items.";
     if (obs_filter_get_target(filter) != parent)
         return "Move Glowbox first in the filter list to use Subject controls.";
-    bool transition = false;
-    obs_scene_enum_items(scene, has_item_transition, &transition);
-    if (transition)
-        return "Subject effects are unavailable while scene items have show or hide transitions.";
     obs_video_info video = {};
     if (obs_get_video_info(&video) && (obs_source_get_base_width(parent) != video.base_width ||
                                        obs_source_get_base_height(parent) != video.base_height))

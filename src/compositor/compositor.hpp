@@ -31,6 +31,7 @@ inline bool is_coverage_capture(LayerCaptureMode mode) {
 }
 struct LayerView {
     obs_source_t *original = nullptr;
+    obs_source_t *transition = nullptr; // Owns a reference to the transition, OBS controls playback.
     obs_source_t *capture_filter = nullptr; // Scoped replay hook, never owns this filter.
     obs_source_t *capture_input =
         nullptr;                   // borrowed for replay, original is the retained source
