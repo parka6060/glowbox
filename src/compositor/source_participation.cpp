@@ -78,8 +78,14 @@ bool prepare_source_reactive_mask(Compositor *f) {
 bool prepare_exclusions(Compositor *f) {
     if (!f->protected_color)
         f->protected_color = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+    // Additive coverage must clamp after each item, just like the scene colour.
+    const auto coverage_format = f->additive_background ? GS_RGBA : GS_RGBA16F;
+    if (f->protection_mask && gs_texrender_get_format(f->protection_mask) != coverage_format) {
+        gs_texrender_destroy(f->protection_mask);
+        f->protection_mask = nullptr;
+    }
     if (!f->protection_mask)
-        f->protection_mask = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
+        f->protection_mask = gs_texrender_create(coverage_format, GS_ZS_NONE);
     if (!f->exclusion_input)
         f->exclusion_input = gs_texrender_create(GS_RGBA16F, GS_ZS_NONE);
     if (!f->protected_color || !f->protection_mask || !f->exclusion_input)

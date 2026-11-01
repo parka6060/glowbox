@@ -116,8 +116,11 @@ static obs_source_t *active_item_transition(obs_sceneitem_t *item) {
     return playing ? obs_source_get_ref(transition) : nullptr;
 }
 bool sync_mirror(Compositor *f, obs_scene_t *scene) {
-    if (!scene)
+    f->additive_background = false;
+    if (!scene) {
+        f->composition_failure = "parent is not a scene";
         return false;
+    }
     prepare_subject_settings(f, scene);
     std::vector<obs_sceneitem_t *> live;
     obs_scene_enum_items(scene, collect_item, &live);
@@ -145,11 +148,47 @@ bool sync_mirror(Compositor *f, obs_scene_t *scene) {
                                     f->has_exclusions != (f->protected_mirror != nullptr) ||
                                     (f->has_exclusions || f->has_reactive_overrides) != (f->protection_mask_mirror != nullptr) ||
                                     f->has_spotlight_overrides != (f->lighting_mask_mirror != nullptr);
+    const auto background_prefix_can_blend = [&](size_t index) {
+        if (f->scene_capture_callback || f->has_spotlight_overrides || f->has_reactive_overrides ||
+            f->reactive_background)
+            return false;
+        // Every item through this blend must leave the subject and protection masks at zero.
+        for (size_t i = 0; i <= index; ++i) {
+            auto *item = live[i];
+            if (!obs_sceneitem_visible(item)) {
+                auto *transition = active_item_transition(item);
+                const bool is_hiding = transition != nullptr;
+                obs_source_release(transition);
+                if (is_hiding)
+                    return false;
+                continue;
+            }
+            const auto policy = source_policy(obs_sceneitem_get_source(item));
+            if (policy.receive >= 0 || policy.produce_effects != 1 || policy.receive_effects != 1 ||
+                policy.receive_spotlight != 1 || policy.receive_rays != 1 || policy.reactive_override >= 0 ||
+                obs_data_get_bool(f->layer_settings, subject_setting_key(item).c_str()))
+                return false;
+            const auto mode = obs_sceneitem_get_blending_mode(item);
+            if (mode != OBS_BLEND_NORMAL && mode != OBS_BLEND_SCREEN &&
+                mode != OBS_BLEND_ADDITIVE && mode != OBS_BLEND_MULTIPLY)
+                return false;
+        }
+        return true;
+    };
+    const auto reject_blend = [&](obs_sceneitem_t *item) {
+        if (!f->composition_failure) {
+            f->composition_failure = "source coverage cannot compose this blend arrangement";
+            f->composition_failure_item_id = obs_sceneitem_get_id(item);
+            f->composition_failure_blend_mode = int(obs_sceneitem_get_blending_mode(item));
+        }
+        supported = false;
+    };
     for (size_t i = 0; i < live.size(); ++i) {
-        // Protected contributions use normal premultiplied over-compositing.
+        if (obs_sceneitem_visible(live[i]) && obs_sceneitem_get_blending_mode(live[i]) == OBS_BLEND_ADDITIVE)
+            f->additive_background = true;
         if ((f->has_exclusions || f->has_reactive_overrides || f->has_spotlight_overrides) && obs_sceneitem_visible(live[i]) &&
-            obs_sceneitem_get_blending_mode(live[i]) != OBS_BLEND_NORMAL)
-            supported = false;
+            obs_sceneitem_get_blending_mode(live[i]) != OBS_BLEND_NORMAL && !background_prefix_can_blend(i))
+            reject_blend(live[i]);
         if (!rebuild && (f->items[i].id != obs_sceneitem_get_id(live[i]) ||
                          f->items[i].view->original != obs_sceneitem_get_source(live[i])))
             rebuild = true;
@@ -217,12 +256,16 @@ bool sync_mirror(Compositor *f, obs_scene_t *scene) {
                                 protected_copy, protection_mask_copy, lighting_copy});
         }
     }
+    if (!supported && !f->composition_failure)
+        f->composition_failure = "could not create composition scenes or layers";
     if (supported) {
         // Mirror scenes use the OBS video canvas, so source dimensions must match.
 
         auto *mirror_source = obs_scene_get_source(f->mirror);
         supported = obs_source_get_width(mirror_source) == f->width &&
                     obs_source_get_height(mirror_source) == f->height;
+        if (!supported)
+            f->composition_failure = "scene dimensions do not match the video canvas";
     }
     if (supported)
         for (size_t i = 0; i < live.size(); ++i) {
@@ -235,8 +278,9 @@ bool sync_mirror(Compositor *f, obs_scene_t *scene) {
                 obs_transition_set_size(transition, obs_source_get_width(entry.view->original),
                                         obs_source_get_height(entry.view->original));
                 if ((f->has_exclusions || f->has_reactive_overrides || f->has_spotlight_overrides) &&
-                    obs_sceneitem_get_blending_mode(live[i]) != OBS_BLEND_NORMAL)
-                    supported = false;
+                    obs_sceneitem_get_blending_mode(live[i]) != OBS_BLEND_NORMAL &&
+                    (!obs_sceneitem_visible(live[i]) || !background_prefix_can_blend(i)))
+                    reject_blend(live[i]);
             }
             obs_transform_info transform = {};
             obs_sceneitem_get_info2(live[i], &transform);

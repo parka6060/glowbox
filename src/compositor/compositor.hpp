@@ -153,6 +153,10 @@ struct Compositor {
     obs_scene_t *protected_mirror = nullptr, *protection_mask_mirror = nullptr;
     obs_scene_t *lighting_mask_mirror = nullptr;
     bool has_exclusions = false, has_spill = false, exclusion_failure_logged = false;
+    bool additive_background = false;
+    const char *composition_failure = nullptr;
+    int64_t composition_failure_item_id = 0;
+    int composition_failure_blend_mode = 0;
     gs_texrender_t *protected_color = nullptr, *protection_mask = nullptr;
     gs_texrender_t *exclusion_input = nullptr, *exclusion_emission = nullptr;
     gs_texrender_t *final_capture = nullptr, *final_scratch = nullptr;

@@ -305,10 +305,25 @@ void render_filter(void *data, gs_effect_t *) {
             release_exclusion_buffers(f);
         f->has_exclusions = exclusions;
         f->has_spill = false;
-        f->layered = (scene_view_active(f->view) || f->scene_capture_callback || f->wants_layers || f->has_exclusions || f->has_screen_overrides || f->has_spotlight_overrides || features.treatment || reactive_requested(f)) && target == parent && sync_mirror(f, scene);
-        if ((scene_view_active(f->view) || f->has_exclusions || f->has_screen_overrides || f->has_spotlight_overrides || features.treatment) && !f->layered) {
-            if (!f->exclusion_failure_logged)
-                blog(LOG_WARNING, "[Glowbox] scene composition unavailable; showing the original scene");
+        f->composition_failure = target != parent ? "another filter precedes composition" : nullptr;
+        f->composition_failure_item_id = 0;
+        f->composition_failure_blend_mode = 0;
+        const bool composition_required = scene_view_active(f->view) || f->has_exclusions ||
+                                          f->has_screen_overrides || f->has_spotlight_overrides || features.treatment;
+        const bool capture_requested = composition_required || f->scene_capture_callback ||
+                                       f->wants_layers || reactive_requested(f);
+        f->layered = capture_requested && target == parent && sync_mirror(f, scene);
+        if (composition_required && !f->layered) {
+            if (!f->exclusion_failure_logged) {
+                blog(LOG_WARNING, "[Glowbox] scene composition unavailable: %s, showing the original scene",
+                     f->composition_failure ? f->composition_failure : "composition could not start");
+                if (f->composition_failure_item_id) {
+                    auto *item = obs_scene_find_sceneitem_by_id(scene, f->composition_failure_item_id);
+                    blog(LOG_WARNING, "[Glowbox] scene item '%s' (id %lld), blend mode %d",
+                         item ? obs_source_get_name(obs_sceneitem_get_source(item)) : "unavailable",
+                         (long long)f->composition_failure_item_id, f->composition_failure_blend_mode);
+                }
+            }
             f->exclusion_failure_logged = true;
             success = false;
         } else
@@ -321,13 +336,12 @@ void render_filter(void *data, gs_effect_t *) {
                 return item.view->treatment.color_match > 0 || item.view->treatment.match_override > 0;
             });
         if (f->layered && needs_match &&
-            (f->color_sample_elapsed >= .1f || !gs_texrender_get_texture(f->color_sample)))
+            (f->color_sample_elapsed >= .1f || !gs_texrender_get_texture(f->color_sample))) {
             success = sample_background_color(f);
-        if (!success && !f->sample_failure_logged)
-            blog(LOG_WARNING,
-                 "[Glowbox%s] background color sampling failed; showing source and retrying next frame",
-                 f->native_active ? " native" : "");
-        f->sample_failure_logged = !success;
+            if (!success && !f->sample_failure_logged)
+                blog(LOG_WARNING, "[Glowbox] background color sampling failed, showing source and retrying next frame");
+            f->sample_failure_logged = !success;
+        }
         const bool source_reactive = f->layered && std::any_of(f->items.begin(), f->items.end(),
             [](const MirrorItem &item) { return item.view->treatment.reactive > 0; });
         if (success && source_reactive) {
