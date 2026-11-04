@@ -149,7 +149,7 @@ bool sync_mirror(Compositor *f, obs_scene_t *scene) {
                                     (f->has_exclusions || f->has_reactive_overrides) != (f->protection_mask_mirror != nullptr) ||
                                     f->has_spotlight_overrides != (f->lighting_mask_mirror != nullptr);
     const auto background_prefix_can_blend = [&](size_t index) {
-        if (f->scene_capture_callback || f->has_spotlight_overrides || f->has_reactive_overrides ||
+        if (f->has_spotlight_overrides || f->has_reactive_overrides ||
             f->reactive_background)
             return false;
         // Every item through this blend must leave the subject and protection masks at zero.
@@ -186,7 +186,7 @@ bool sync_mirror(Compositor *f, obs_scene_t *scene) {
     for (size_t i = 0; i < live.size(); ++i) {
         if (obs_sceneitem_visible(live[i]) && obs_sceneitem_get_blending_mode(live[i]) == OBS_BLEND_ADDITIVE)
             f->additive_background = true;
-        if ((f->has_exclusions || f->has_reactive_overrides || f->has_spotlight_overrides) && obs_sceneitem_visible(live[i]) &&
+        if ((f->scene_capture_callback || f->has_exclusions || f->has_reactive_overrides || f->has_spotlight_overrides) && obs_sceneitem_visible(live[i]) &&
             obs_sceneitem_get_blending_mode(live[i]) != OBS_BLEND_NORMAL && !background_prefix_can_blend(i))
             reject_blend(live[i]);
         if (!rebuild && (f->items[i].id != obs_sceneitem_get_id(live[i]) ||
@@ -277,7 +277,7 @@ bool sync_mirror(Compositor *f, obs_scene_t *scene) {
             if (transition) {
                 obs_transition_set_size(transition, obs_source_get_width(entry.view->original),
                                         obs_source_get_height(entry.view->original));
-                if ((f->has_exclusions || f->has_reactive_overrides || f->has_spotlight_overrides) &&
+                if ((f->scene_capture_callback || f->has_exclusions || f->has_reactive_overrides || f->has_spotlight_overrides) &&
                     obs_sceneitem_get_blending_mode(live[i]) != OBS_BLEND_NORMAL &&
                     (!obs_sceneitem_visible(live[i]) || !background_prefix_can_blend(i)))
                     reject_blend(live[i]);

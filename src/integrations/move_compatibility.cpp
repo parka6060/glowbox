@@ -6,6 +6,7 @@
 #include "compositor/compositor.hpp"
 #include "compositor/shader_preparation.hpp"
 #include <map>
+#include <set>
 #include <sstream>
 #include <iomanip>
 
@@ -780,7 +781,7 @@ struct Collect {
     std::vector<Item> *items;
     int side;
     obs_data_t *config;
-    bool valid = true;
+    bool valid = true, has_blended_items = false;
     bool camera_active = false, camera_intermediate = false, has_group_inputs = false;
     bool inherited_role = false, parent_subject = false;
     bool override_child_transition = false;
@@ -829,14 +830,15 @@ bool collect(obs_scene_t *, obs_sceneitem_t *item, void *data) {
             c->override_child_transition = c->override_child_transition || nested.override_child_transition;
         }
     }
-    if (obs_sceneitem_get_blending_mode(item) != OBS_BLEND_NORMAL)
+    const auto blend = obs_sceneitem_get_blending_mode(item);
+    c->has_blended_items |= blend != OBS_BLEND_NORMAL;
+    if (blend != OBS_BLEND_NORMAL &&
+        (c->camera_active || (blend != OBS_BLEND_SCREEN && blend != OBS_BLEND_ADDITIVE && blend != OBS_BLEND_MULTIPLY)))
         c->valid = false;
     for (auto &entry : *c->items)
         if (entry.source == source) {
             if (entry.item[c->side]) {
-                // One wrapper can serve every placement of a source. Move supplies
-                // each transform, only conflicting per-instance subject roles
-                // are ambiguous to this source-level capture hook.
+                // Move supplies the transforms, repeated placements must share a subject role.
                 if (subject != entry.subject[c->side])
                     c->valid = false;
                 return true;
@@ -987,6 +989,113 @@ void move_spatial_light(TransitionEndpoint &endpoint, float progress) {
     project_reactive_geometry(f, g);
     f->reactive_geometry = g;
 }
+std::string blend_source_key(obs_sceneitem_t *item) {
+    auto *source = obs_sceneitem_get_source(item);
+    if (!obs_sceneitem_is_group(item))
+        return obs_source_get_uuid(source);
+    std::vector<std::string> children;
+    obs_scene_enum_items(obs_sceneitem_group_get_scene(item), [](obs_scene_t *, obs_sceneitem_t *child, void *data) {
+        if (obs_sceneitem_visible(child))
+            static_cast<std::vector<std::string> *>(data)->push_back(blend_source_key(child));
+        return true;
+    }, &children);
+    std::sort(children.begin(), children.end());
+    std::string key = "[";
+    for (const auto &child : children)
+        key += child + "/";
+    return key + "]";
+}
+struct BlendPlacement {
+    obs_source_t *source;
+    std::string key;
+    std::pair<obs_blending_type, obs_blending_method> blend;
+};
+using BlendLayout = std::vector<BlendPlacement>;
+
+BlendLayout collect_blend_layout(obs_scene_t *scene) {
+    BlendLayout placements;
+    obs_scene_enum_items(scene, [](obs_scene_t *, obs_sceneitem_t *item, void *data) {
+        auto *source = obs_sceneitem_get_source(item);
+        if (obs_sceneitem_visible(item) && (obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO))
+            static_cast<BlendLayout *>(data)->push_back({source, blend_source_key(item),
+                {obs_sceneitem_get_blending_mode(item), obs_sceneitem_get_blending_method(item)}});
+        return true;
+    }, &placements);
+    return placements;
+}
+
+bool blend_layouts_compatible(const BlendLayout (&layouts)[2]) {
+    if (layouts[0].size() != layouts[1].size())
+        return false;
+    using BlendsBySource = std::map<std::string, std::pair<obs_blending_type, obs_blending_method>>;
+    BlendsBySource source_blends[2], background_blends[2];
+    bool has_repeated_sources = false;
+    for (int side = 0; side < 2; ++side) {
+        std::map<std::string, obs_source_t *> sources;
+        BlendsBySource treatment_background_blends;
+        for (const auto &placement : layouts[side]) {
+            const auto inserted = sources.emplace(placement.key, placement.source);
+            if (!inserted.second) {
+                has_repeated_sources = true;
+                if (inserted.first->second != placement.source || source_blends[side].at(placement.key) != placement.blend)
+                    return false;
+            }
+            source_blends[side][placement.key] = placement.blend;
+            if (placement.blend.first != OBS_BLEND_NORMAL) {
+                background_blends[side] = source_blends[side];
+                if (inserted.second)
+                    treatment_background_blends = background_blends[side];
+            }
+        }
+        // Deduplication must preserve the source set beneath the last blend.
+        if (treatment_background_blends != background_blends[side])
+            return false;
+    }
+    // One source hook serves every placement, so repeated sources must keep their order.
+    if (has_repeated_sources) {
+        for (size_t i = 0; i < layouts[0].size(); ++i) {
+            if (layouts[0][i].key != layouts[1][i].key)
+                return false;
+        }
+    }
+    return source_blends[0] == source_blends[1] && background_blends[0] == background_blends[1];
+}
+
+bool build_treatment_order(const Items &items, obs_scene_t *a, obs_scene_t *b, bool blended,
+                     std::vector<const Item *> (&order)[2]) {
+    BlendLayout layouts[2];
+    if (blended) {
+        layouts[0] = collect_blend_layout(a);
+        layouts[1] = collect_blend_layout(b);
+        if (!blend_layouts_compatible(layouts))
+            return false;
+    }
+    for (int side = 0; side < 2; ++side) {
+        if (!blended) {
+            for (const auto &entry : items)
+                order[side].push_back(&entry);
+            continue;
+        }
+        std::set<const Item *> added;
+        const auto add_treatment = [&](const Item &entry) {
+            const bool first_placement = added.insert(&entry).second;
+            if (first_placement)
+                order[side].push_back(&entry);
+        };
+        for (const auto &placement : layouts[side]) {
+            for (const auto &entry : items) {
+                auto *other = entry.item[1 - side];
+                const bool matching_group = !entry.item[side] && other && obs_sceneitem_is_group(other) &&
+                                            placement.key == blend_source_key(other);
+                if (entry.source == placement.source || matching_group)
+                    add_treatment(entry);
+            }
+        }
+        for (const auto &entry : items)
+            add_treatment(entry);
+    }
+    return true;
+}
 bool prepare(Bridge *b, obs_source_t *a, obs_source_t *z) {
     b->attempted = true;
     b->pair_start = b->completed;
@@ -1027,6 +1136,11 @@ bool prepare(Bridge *b, obs_source_t *a, obs_source_t *z) {
     ca.camera_active = cz.camera_active = camera_active;
     obs_scene_enum_items(sa, collect, &ca);
     obs_scene_enum_items(sz, collect, &cz);
+    // Move owns draw order. Either endpoint must use the same blend settings.
+    const bool blended = ca.has_blended_items || cz.has_blended_items;
+    std::vector<const Item *> order[2];
+    if (!build_treatment_order(items, sa, sz, blended, order))
+        ca.valid = false;
     b->replay_placements = camera_active && (ca.camera_intermediate || cz.camera_intermediate);
     b->has_group_inputs = ca.has_group_inputs || cz.has_group_inputs;
     if ((camera_active && !direct_children) || !ca.valid || !cz.valid) {
@@ -1077,7 +1191,8 @@ bool prepare(Bridge *b, obs_source_t *a, obs_source_t *z) {
         endpoint.treatment_scene = obs_scene_create_private("Glowbox transition treatment");
         auto *config = obs_data_create();
         obs_data_apply(config, configs[n]);
-        for (const auto &entry : items) {
+        for (const auto *ordered : order[n]) {
+            const auto &entry = *ordered;
             auto *original = entry.item[n] ? entry.item[n] : entry.item[1 - n];
             auto *copy = obs_scene_add(endpoint.treatment_scene, entry.source);
             obs_sceneitem_set_visible(copy, (entry.item[0] && obs_sceneitem_visible(entry.item[0])) ||
@@ -1089,6 +1204,8 @@ bool prepare(Bridge *b, obs_source_t *a, obs_source_t *z) {
             obs_sceneitem_get_crop(original, &crop);
             obs_sceneitem_set_crop(copy, &crop);
             obs_sceneitem_set_scale_filter(copy, obs_sceneitem_get_scale_filter(original));
+            obs_sceneitem_set_blending_mode(copy, obs_sceneitem_get_blending_mode(original));
+            obs_sceneitem_set_blending_method(copy, obs_sceneitem_get_blending_method(original));
             const int policy = entry.item[n] ? n : 1 - n;
             bool subject = entry.subject[policy];
             obs_data_set_bool(config, subject_setting_key(copy).c_str(), subject);
