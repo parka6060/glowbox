@@ -18,6 +18,13 @@ Vertex VS(Vertex v) {
     v.pos = mul(float4(v.pos.xyz, 1.0), ViewProj);
     return v;
 }
+
+// Declaring unused UVs breaks analysis on NVIDIA OpenGL because OBS tries to bind the discarded input.
+struct AnalysisVertex { float4 pos : POSITION; };
+AnalysisVertex AnalysisPositionVS(AnalysisVertex v) {
+    v.pos = mul(float4(v.pos.xyz, 1.0), ViewProj);
+    return v;
+}
 float4 Copy(Vertex v) : TARGET {
     return image.Sample(linear_sampler, v.uv);
 }
@@ -47,7 +54,7 @@ float FollowBrightnessGain(bool subject) {
 }
 uniform texture2d average_previous;
 uniform float average_response;
-float4 Average(Vertex v) : TARGET {
+float4 Average(AnalysisVertex v) : TARGET {
     float4 total = image.Sample(linear_sampler, float2(.5,.5));
     for (int y = 1; y <= 5; ++y)
         for (int x = 1; x <= 7; ++x)

@@ -174,6 +174,9 @@ static void layer_render(void *data, gs_effect_t *) {
         if (v->viewport_capture) {
             vec2 size = {float(source_width) / w, float(source_height) / h};
             gs_effect_set_vec2(gs_effect_get_param_by_name(v->effect, "layer_source_scale"), &size);
+            // Replay bypasses ViewProj, so it applies OBS's Y flip for OpenGL texture targets here.
+            const float y_sign = gs_get_device_type() == GS_DEVICE_OPENGL && gs_get_render_target() ? -1.f : 1.f;
+            gs_effect_set_float(gs_effect_get_param_by_name(v->effect, "layer_viewport_y_sign"), y_sign);
         }
         const char *technique = v->capture_mode == LayerCaptureMode::ProtectedColor
                                     ? (custom ? "ProtectionCustomColor" : "ProtectionColor")

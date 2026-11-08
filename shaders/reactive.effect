@@ -227,7 +227,7 @@ uniform float follow_elapsed;
 uniform float follow_sensitivity;
 uniform float follow_darken;
 uniform float follow_brighten;
-float4 FollowBrightnessAnalysis(Vertex v) : TARGET {
+float4 FollowBrightnessAnalysis(AnalysisVertex v) : TARGET {
     float total = 0, sum = 0;
     if (follow_valid) for (int y=0;y<8;++y) for (int x=0;x<12;++x) {
         float2 uv=float2((x+.5)/12,(y+.5)/8);
@@ -244,4 +244,4 @@ float4 FollowBrightnessAnalysis(Vertex v) : TARGET {
         : 1-exp(-follow_elapsed/((target>previous?.25:.6)*sqrt(reactive_response_scale)));
     return float4(lerp(previous,target,response),target,total,1);
 }
-technique FollowBrightnessAnalysis { pass { vertex_shader=VS(v); pixel_shader=FollowBrightnessAnalysis(v); } }
+technique FollowBrightnessAnalysis { pass { vertex_shader=AnalysisPositionVS(v); pixel_shader=FollowBrightnessAnalysis(v); } }

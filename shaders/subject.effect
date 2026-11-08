@@ -40,14 +40,17 @@ technique Layer { pass { vertex_shader = VS(v); pixel_shader = Layer(v); } }
 // source-local UV from the incoming affine projection for Color Match.
 // gs_draw_sprite already scales ViewProj by the captured viewport extent.
 uniform float2 layer_source_scale;
+uniform float layer_viewport_y_sign;
+// Declaring POSITION breaks replay on NVIDIA OpenGL because OBS tries to bind the discarded input.
+struct LayerViewportInput { float2 uv : TEXCOORD0; };
 struct LayerViewportVertex {
     float4 pos : POSITION;
     float2 uv : TEXCOORD0;
     float2 source_uv : TEXCOORD1;
 };
-LayerViewportVertex LayerViewportVS(Vertex v) {
+LayerViewportVertex LayerViewportVS(LayerViewportInput v) {
     LayerViewportVertex result;
-    float2 clip = float2(2 * v.uv.x - 1, 1 - 2 * v.uv.y);
+    float2 clip = float2(2 * v.uv.x - 1, (1 - 2 * v.uv.y) * layer_viewport_y_sign);
     float2 origin = mul(float4(0, 0, 0, 1), ViewProj).xy;
     float2 axis_x = mul(float4(layer_source_scale.x, 0, 0, 0), ViewProj).xy;
     float2 axis_y = mul(float4(0, layer_source_scale.y, 0, 0), ViewProj).xy;
