@@ -11,7 +11,7 @@ technique SubjectMask {
 }
 
 technique Copy { pass { vertex_shader = VS(v); pixel_shader = Copy(v); } }
-technique Average { pass { vertex_shader = VS(v); pixel_shader = Average(v); } }
+technique Average { pass { vertex_shader = AnalysisPositionVS(v); pixel_shader = Average(v); } }
 
 float4 ViewportSubjectMask(LayerViewportVertex v) : TARGET {
     Vertex source;
